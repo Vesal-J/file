@@ -1,0 +1,30 @@
+[package]
+name = "file-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+uu_file = { path = ".." }
+
+[[bin]]
+name = "fuzz_classify"
+path = "fuzz_targets/fuzz_classify.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_magic_parser"
+path = "fuzz_targets/fuzz_magic_parser.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "fuzz_diff"
+path = "fuzz_targets/fuzz_diff.rs"
+test = false
+doc = false
