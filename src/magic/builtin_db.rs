@@ -598,8 +598,12 @@ pub fn check_fast_path(buffer: &[u8]) -> Option<MagicMatch> {
         });
     }
 
-    // Java class or Mach-O Fat
-    if buffer.starts_with(b"\xca\xfe\xba\xbe") {
+    // Java class or Mach-O Fat (32- or 64-bit, either byte order).
+    if buffer.starts_with(b"\xca\xfe\xba\xbe")
+        || buffer.starts_with(b"\xbe\xba\xfe\xca")
+        || buffer.starts_with(b"\xca\xfe\xba\xbf")
+        || buffer.starts_with(b"\xbf\xba\xfe\xca")
+    {
         if buffer.len() >= 8 {
             let major = u16::from_be_bytes([buffer[6], buffer[7]]);
             if (45..=70).contains(&major) {
@@ -1268,17 +1272,35 @@ fn describe_fat_macho(buffer: &[u8]) -> String {
     if buffer.len() < 8 {
         return "Mach-O universal binary".to_string();
     }
-    let count = u32::from_be_bytes(buffer[4..8].try_into().unwrap_or([0; 4])) as usize;
-    let count = count.min((buffer.len().saturating_sub(8)) / 20);
+    let (little, is_64) = match buffer.get(..4) {
+        Some(b"\xca\xfe\xba\xbe") => (false, false),
+        Some(b"\xbe\xba\xfe\xca") => (true, false),
+        Some(b"\xca\xfe\xba\xbf") => (false, true),
+        Some(b"\xbf\xba\xfe\xca") => (true, true),
+        _ => return "Mach-O universal binary".to_string(),
+    };
+    let read_u32 = |bytes: &[u8]| {
+        let bytes: [u8; 4] = bytes.try_into().unwrap_or([0; 4]);
+        if little { u32::from_le_bytes(bytes) } else { u32::from_be_bytes(bytes) }
+    };
+    let read_u64 = |bytes: &[u8]| {
+        let bytes: [u8; 8] = bytes.try_into().unwrap_or([0; 8]);
+        if little { u64::from_le_bytes(bytes) } else { u64::from_be_bytes(bytes) }
+    };
+    let count = read_u32(&buffer[4..8]) as usize;
+    let entry_size = if is_64 { 32 } else { 20 };
+    let count = count.min((buffer.len().saturating_sub(8)) / entry_size);
     let mut details = Vec::new();
     let mut markers = Vec::new();
     for index in 0..count {
-        let entry = 8 + index * 20;
-        let cpu = u32::from_be_bytes(buffer[entry..entry + 4].try_into().unwrap_or([0; 4]));
-        let subtype =
-            u32::from_be_bytes(buffer[entry + 4..entry + 8].try_into().unwrap_or([0; 4])) & 0xff;
-        let offset =
-            u32::from_be_bytes(buffer[entry + 8..entry + 12].try_into().unwrap_or([0; 4])) as usize;
+        let entry = 8 + index * entry_size;
+        let cpu = read_u32(&buffer[entry..entry + 4]);
+        let subtype = read_u32(&buffer[entry + 4..entry + 8]) & 0xff;
+        let offset = if is_64 {
+            read_u64(&buffer[entry + 8..entry + 16]) as usize
+        } else {
+            read_u32(&buffer[entry + 8..entry + 12]) as usize
+        };
         let arch = match cpu {
             0x0100_0007 => "x86_64",
             0x0100_000c if subtype == 2 => "arm64e",
