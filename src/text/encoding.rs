@@ -20,8 +20,8 @@ impl Charset {
     pub fn name(&self) -> &'static str {
         match self {
             Self::Ascii => "ASCII",
-            Self::Utf8 => "UTF-8 Unicode",
-            Self::Utf8Bom => "UTF-8 Unicode (with BOM)",
+            Self::Utf8 => "Unicode text, UTF-8",
+            Self::Utf8Bom => "Unicode text, UTF-8 (with BOM)",
             Self::Utf16Le => "Little-endian UTF-16 Unicode",
             Self::Utf16Be => "Big-endian UTF-16 Unicode",
             Self::Utf32Le => "Little-endian UTF-32 Unicode",
@@ -54,16 +54,20 @@ pub struct LineCharacteristics {
     pub has_crlf: bool,
     pub has_cr: bool,
     pub has_lf: bool,
-    pub has_long_lines: bool,
+    pub max_line_len: usize,
     pub no_line_terminators: bool,
 }
 
 impl LineCharacteristics {
-    pub fn describe(&self) -> Vec<&'static str> {
+    pub fn describe(&self) -> Vec<String> {
         let mut parts = Vec::new();
 
+        if self.max_line_len > 300 {
+            parts.push(format!("with very long lines ({})", self.max_line_len));
+        }
+
         if self.no_line_terminators {
-            parts.push("with no line terminators");
+            parts.push("with no line terminators".to_string());
         } else {
             let crlf = self.has_crlf;
             let cr = self.has_cr;
@@ -71,17 +75,13 @@ impl LineCharacteristics {
 
             let terminators_count = (crlf as usize) + (cr as usize) + (lf as usize);
             if terminators_count > 1 {
-                parts.push("with mixed line terminators");
+                parts.push("with mixed line terminators".to_string());
             } else if crlf {
-                parts.push("with CRLF line terminators");
+                parts.push("with CRLF line terminators".to_string());
             } else if cr {
-                parts.push("with CR line terminators");
+                parts.push("with CR line terminators".to_string());
             }
             // lone LF is standard unix, so not specially mentioned in description
-        }
-
-        if self.has_long_lines {
-            parts.push("with very long lines");
         }
 
         parts
@@ -100,7 +100,7 @@ pub fn detect_encoding(buffer: &[u8], max_bytes: usize) -> (Charset, LineCharact
                 has_crlf: false,
                 has_cr: false,
                 has_lf: false,
-                has_long_lines: false,
+                max_line_len: 0,
                 no_line_terminators: true,
             },
         );
@@ -118,7 +118,7 @@ pub fn detect_encoding(buffer: &[u8], max_bytes: usize) -> (Charset, LineCharact
                 has_crlf: false,
                 has_cr: false,
                 has_lf: false,
-                has_long_lines: false,
+                max_line_len: 0,
                 no_line_terminators: false,
             },
         );
@@ -130,7 +130,7 @@ pub fn detect_encoding(buffer: &[u8], max_bytes: usize) -> (Charset, LineCharact
                 has_crlf: false,
                 has_cr: false,
                 has_lf: false,
-                has_long_lines: false,
+                max_line_len: 0,
                 no_line_terminators: false,
             },
         );
@@ -142,7 +142,7 @@ pub fn detect_encoding(buffer: &[u8], max_bytes: usize) -> (Charset, LineCharact
                 has_crlf: false,
                 has_cr: false,
                 has_lf: false,
-                has_long_lines: false,
+                max_line_len: 0,
                 no_line_terminators: false,
             },
         );
@@ -154,7 +154,7 @@ pub fn detect_encoding(buffer: &[u8], max_bytes: usize) -> (Charset, LineCharact
                 has_crlf: false,
                 has_cr: false,
                 has_lf: false,
-                has_long_lines: false,
+                max_line_len: 0,
                 no_line_terminators: false,
             },
         );
@@ -169,7 +169,7 @@ pub fn detect_encoding(buffer: &[u8], max_bytes: usize) -> (Charset, LineCharact
                     has_crlf: false,
                     has_cr: false,
                     has_lf: false,
-                    has_long_lines: false,
+                    max_line_len: 0,
                     no_line_terminators: false,
                 },
             );
@@ -181,7 +181,7 @@ pub fn detect_encoding(buffer: &[u8], max_bytes: usize) -> (Charset, LineCharact
                     has_crlf: false,
                     has_cr: false,
                     has_lf: false,
-                    has_long_lines: false,
+                    max_line_len: 0,
                     no_line_terminators: false,
                 },
             );
@@ -213,7 +213,7 @@ pub fn detect_encoding(buffer: &[u8], max_bytes: usize) -> (Charset, LineCharact
                 has_crlf: false,
                 has_cr: false,
                 has_lf: false,
-                has_long_lines: false,
+                max_line_len: 0,
                 no_line_terminators: false,
             },
         );
@@ -234,7 +234,7 @@ fn analyze_lines(slice: &[u8]) -> LineCharacteristics {
     let mut has_crlf = false;
     let mut has_cr = false;
     let mut has_lf = false;
-    let mut has_long_lines = false;
+    let mut max_line_len = 0;
 
     let mut current_line_len = 0;
     let mut i = 0;
@@ -251,15 +251,15 @@ fn analyze_lines(slice: &[u8]) -> LineCharacteristics {
             } else {
                 has_cr = true;
             }
-            if current_line_len > 300 {
-                has_long_lines = true;
+            if current_line_len > max_line_len {
+                max_line_len = current_line_len;
             }
             current_line_len = 0;
         } else if b == b'\n' {
             saw_any_terminator = true;
             has_lf = true;
-            if current_line_len > 300 {
-                has_long_lines = true;
+            if current_line_len > max_line_len {
+                max_line_len = current_line_len;
             }
             current_line_len = 0;
         } else {
@@ -268,15 +268,15 @@ fn analyze_lines(slice: &[u8]) -> LineCharacteristics {
         i += 1;
     }
 
-    if current_line_len > 300 {
-        has_long_lines = true;
+    if current_line_len > max_line_len {
+        max_line_len = current_line_len;
     }
 
     LineCharacteristics {
         has_crlf,
         has_cr,
         has_lf,
-        has_long_lines,
+        max_line_len,
         no_line_terminators: !saw_any_terminator,
     }
 }

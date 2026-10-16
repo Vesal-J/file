@@ -25,7 +25,7 @@ impl TextResult {
             description: description.into(),
             mime_type: mime_type.into(),
             mime_encoding: mime_encoding.into(),
-            extensions: "txt".to_string(),
+            extensions: "???".to_string(),
             apple: "TEXTUNKN".to_string(),
         }
     }
@@ -66,7 +66,7 @@ pub fn test_text(buffer: &[u8], config: &Config) -> Option<TextResult> {
                 description: format!("HTML document, {charset_name} text{line_suffix}"),
                 mime_type: "text/html".to_string(),
                 mime_encoding: mime_encoding.to_string(),
-                extensions: "html/htm".to_string(),
+                extensions: "???".to_string(),
                 apple: "TEXThtml".to_string(),
             });
         }
@@ -86,8 +86,18 @@ pub fn test_text(buffer: &[u8], config: &Config) -> Option<TextResult> {
                 description: format!("XML 1.0 document, {charset_name} text{line_suffix}"),
                 mime_type: "text/xml".to_string(),
                 mime_encoding: mime_encoding.to_string(),
-                extensions: "xml".to_string(),
+                extensions: "???".to_string(),
                 apple: "TEXTxml ".to_string(),
+            });
+        }
+
+        if trimmed.starts_with("<svg") || trimmed.starts_with("<!DOCTYPE svg") || trimmed.starts_with("<!doctype svg") {
+            return Some(TextResult {
+                description: format!("SVG Scalable Vector Graphics image, {charset_name} text{line_suffix}"),
+                mime_type: "image/svg+xml".to_string(),
+                mime_encoding: mime_encoding.to_string(),
+                extensions: "svg".to_string(),
+                apple: "TEXTsvg ".to_string(),
             });
         }
 
@@ -110,21 +120,34 @@ pub fn test_text(buffer: &[u8], config: &Config) -> Option<TextResult> {
                 description: format!("unified diff output, {charset_name} text{line_suffix}"),
                 mime_type: "text/x-diff".to_string(),
                 mime_encoding: mime_encoding.to_string(),
-                extensions: "patch/diff".to_string(),
+                extensions: "diff/patch".to_string(),
                 apple: "TEXTdiff".to_string(),
             });
         }
 
         // C / C++ source
-        if (text.contains("#include <") || text.contains("#include \""))
-            && (text.contains("int main(") || text.contains("void main(") || text.contains("#define ") || text.contains("/*"))
-        {
-            if text.contains("namespace ") || text.contains("std::") || text.contains("class ") {
+        let has_include = text.contains("#include <")
+            || text.contains("#include \"")
+            || text.lines().any(|l| l.trim_start().starts_with("#include"));
+        let has_c_ifdef = (text.contains("#ifdef ") || text.contains("#ifndef ")) && text.contains("#endif");
+        let has_c_main = text.contains("int main(") || text.contains("void main(");
+
+        if has_include || has_c_ifdef || has_c_main {
+            let is_cpp = text.lines().any(|l| {
+                let t = l.trim_start();
+                t.starts_with("namespace ")
+                    || t.starts_with("using namespace ")
+                    || t.starts_with("template<")
+                    || t.starts_with("template <")
+                    || t.starts_with("class ")
+            }) || text.contains("std::");
+
+            if is_cpp {
                 return Some(TextResult {
                     description: format!("C++ source, {charset_name} text{line_suffix}"),
                     mime_type: "text/x-c++".to_string(),
                     mime_encoding: mime_encoding.to_string(),
-                    extensions: "cpp/cxx/cc".to_string(),
+                    extensions: "???".to_string(),
                     apple: "TEXTc++ ".to_string(),
                 });
             } else {
@@ -132,7 +155,7 @@ pub fn test_text(buffer: &[u8], config: &Config) -> Option<TextResult> {
                     description: format!("C source, {charset_name} text{line_suffix}"),
                     mime_type: "text/x-c".to_string(),
                     mime_encoding: mime_encoding.to_string(),
-                    extensions: "c/h".to_string(),
+                    extensions: "???".to_string(),
                     apple: "TEXTc   ".to_string(),
                 });
             }
@@ -144,7 +167,7 @@ pub fn test_text(buffer: &[u8], config: &Config) -> Option<TextResult> {
         description: format!("{charset_name} text{line_suffix}"),
         mime_type: "text/plain".to_string(),
         mime_encoding: mime_encoding.to_string(),
-        extensions: "txt".to_string(),
+        extensions: "???".to_string(),
         apple: "TEXTUNKN".to_string(),
     })
 }
@@ -188,49 +211,49 @@ fn check_shebang(
             description: format!("POSIX shell script, {charset_name} text executable{line_suffix}"),
             mime_type: "text/x-shellscript".to_string(),
             mime_encoding: mime_encoding.to_string(),
-            extensions: "sh".to_string(),
+            extensions: "???".to_string(),
             apple: "TEXTsh  ".to_string(),
         }),
         "bash" => Some(TextResult {
             description: format!("Bourne-Again shell script, {charset_name} text executable{line_suffix}"),
             mime_type: "text/x-shellscript".to_string(),
             mime_encoding: mime_encoding.to_string(),
-            extensions: "sh/bash".to_string(),
+            extensions: "???".to_string(),
             apple: "TEXTbash".to_string(),
         }),
         s if s.starts_with("python") => Some(TextResult {
             description: format!("Python script, {charset_name} text executable{line_suffix}"),
             mime_type: "text/x-script.python".to_string(),
             mime_encoding: mime_encoding.to_string(),
-            extensions: "py".to_string(),
+            extensions: "???".to_string(),
             apple: "TEXTpy  ".to_string(),
         }),
         s if s.starts_with("perl") => Some(TextResult {
-            description: format!("Perl script, {charset_name} text executable{line_suffix}"),
+            description: format!("Perl script text executable{line_suffix}"),
             mime_type: "text/x-perl".to_string(),
             mime_encoding: mime_encoding.to_string(),
-            extensions: "pl".to_string(),
+            extensions: "???".to_string(),
             apple: "TEXTpl  ".to_string(),
         }),
         s if s.starts_with("ruby") => Some(TextResult {
             description: format!("Ruby script, {charset_name} text executable{line_suffix}"),
             mime_type: "text/x-ruby".to_string(),
             mime_encoding: mime_encoding.to_string(),
-            extensions: "rb".to_string(),
+            extensions: "???".to_string(),
             apple: "TEXTrb  ".to_string(),
         }),
         "node" | "nodejs" => Some(TextResult {
             description: format!("Node.js script, {charset_name} text executable{line_suffix}"),
             mime_type: "application/javascript".to_string(),
             mime_encoding: mime_encoding.to_string(),
-            extensions: "js".to_string(),
+            extensions: "???".to_string(),
             apple: "TEXTjs  ".to_string(),
         }),
         _ => Some(TextResult {
             description: format!("a {full_path} script, {charset_name} text executable{line_suffix}"),
             mime_type: "text/plain".to_string(),
             mime_encoding: mime_encoding.to_string(),
-            extensions: "txt".to_string(),
+            extensions: "???".to_string(),
             apple: "TEXTUNKN".to_string(),
         }),
     }

@@ -151,6 +151,28 @@ fn inspect_target_metadata(
 
     // If regular file and size == 0
     if meta.is_file() && meta.len() == 0 {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let mode = meta.mode();
+            let mut parts = Vec::new();
+            if (mode & 0o4000) != 0 {
+                parts.push("setuid");
+            }
+            if (mode & 0o2000) != 0 {
+                parts.push("setgid");
+            }
+            if (mode & 0o1000) != 0 {
+                parts.push("sticky");
+            }
+            if !parts.is_empty() {
+                return Ok(Some(FsResult::new(
+                    format!("{}, empty", parts.join(", ")),
+                    "application/x-empty",
+                    "binary",
+                )));
+            }
+        }
         return Ok(Some(FsResult::empty()));
     }
 

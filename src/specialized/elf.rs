@@ -15,6 +15,14 @@ pub struct SpecializedResult {
 }
 
 pub fn test_elf(buffer: &[u8], config: &Config) -> Option<SpecializedResult> {
+    test_elf_with_path(buffer, config, None)
+}
+
+pub fn test_elf_with_path(
+    buffer: &[u8],
+    config: &Config,
+    path: Option<&std::path::Path>,
+) -> Option<SpecializedResult> {
     if buffer.len() < 52 || !buffer.starts_with(b"\x7fELF") {
         return None;
     }
@@ -85,15 +93,7 @@ pub fn test_elf(buffer: &[u8], config: &Config) -> Option<SpecializedResult> {
         _ => "unknown arch",
     };
 
-    let (type_desc, mime_type) = match e_type {
-        1 => ("relocatable", "application/x-object"),
-        2 => ("executable", "application/x-executable"),
-        3 => ("pie executable", "application/x-pie-executable"),
-        4 => ("core file", "application/x-coredump"),
-        _ => ("unknown type", "application/x-executable"),
-    };
-
-    // Program headers inspection (interpreter, build id)
+    // Program headers inspection (interpreter, build id, dynamic)
     let (phoff, phentsize, phnum) = if is_64 {
         let phoff = read_u64(buffer, 32).unwrap_or(0) as usize;
         let phentsize = read_u16(buffer, 54).unwrap_or(0) as usize;
@@ -109,6 +109,9 @@ pub fn test_elf(buffer: &[u8], config: &Config) -> Option<SpecializedResult> {
     let mut interpreter = None;
     let mut build_id = None;
     let mut os_version = None;
+    let mut has_dynamic = false;
+    let mut has_pie_flag = false;
+    let mut need_count = 0;
 
     let scan_phnum = phnum.min(config.params.elf_phnum);
     if phoff > 0 && phentsize >= 32 && phoff < buffer.len() {
@@ -119,7 +122,49 @@ pub fn test_elf(buffer: &[u8], config: &Config) -> Option<SpecializedResult> {
             }
             let p_type = read_u32(buffer, ph_start).unwrap_or(0);
 
-            if p_type == 3 {
+            if p_type == 2 {
+                // PT_DYNAMIC
+                has_dynamic = true;
+                let (p_offset, p_filesz) = if is_64 {
+                    (
+                        read_u64(buffer, ph_start + 8).unwrap_or(0) as usize,
+                        read_u64(buffer, ph_start + 32).unwrap_or(0) as usize,
+                    )
+                } else {
+                    (
+                        read_u32(buffer, ph_start + 4).unwrap_or(0) as usize,
+                        read_u32(buffer, ph_start + 16).unwrap_or(0) as usize,
+                    )
+                };
+                let entry_size = if is_64 { 16 } else { 8 };
+                if p_offset < buffer.len() {
+                    let dyn_slice = &buffer[p_offset..(p_offset + p_filesz).min(buffer.len())];
+                    let num_entries = dyn_slice.len() / entry_size;
+                    for idx in 0..num_entries {
+                        let off = idx * entry_size;
+                        let (tag, val) = if is_64 {
+                            (
+                                read_u64(dyn_slice, off).unwrap_or(0),
+                                read_u64(dyn_slice, off + 8).unwrap_or(0),
+                            )
+                        } else {
+                            (
+                                read_u32(dyn_slice, off).unwrap_or(0) as u64,
+                                read_u32(dyn_slice, off + 4).unwrap_or(0) as u64,
+                            )
+                        };
+                        if tag == 0 {
+                            break;
+                        }
+                        if tag == 1 {
+                            need_count += 1;
+                        }
+                        if tag == 0x6ffffffb && (val & 0x08000000) != 0 {
+                            has_pie_flag = true;
+                        }
+                    }
+                }
+            } else if p_type == 3 {
                 // PT_INTERP
                 let (p_offset, p_filesz) = if is_64 {
                     (
@@ -142,44 +187,188 @@ pub fn test_elf(buffer: &[u8], config: &Config) -> Option<SpecializedResult> {
                 }
             } else if p_type == 4 {
                 // PT_NOTE
-                let (p_offset, p_filesz) = if is_64 {
+                let (p_offset, p_filesz, p_align) = if is_64 {
                     (
                         read_u64(buffer, ph_start + 8).unwrap_or(0) as usize,
                         read_u64(buffer, ph_start + 32).unwrap_or(0) as usize,
+                        read_u64(buffer, ph_start + 48).unwrap_or(4) as usize,
                     )
                 } else {
                     (
                         read_u32(buffer, ph_start + 4).unwrap_or(0) as usize,
                         read_u32(buffer, ph_start + 16).unwrap_or(0) as usize,
+                        read_u32(buffer, ph_start + 28).unwrap_or(4) as usize,
                     )
                 };
-                if p_offset < buffer.len() {
-                    let max_end = (p_offset + p_filesz).min(buffer.len());
-                    let note_slice = &buffer[p_offset..max_end];
-                    parse_notes(note_slice, is_lsb, &mut build_id, &mut os_version);
+                if p_filesz > 0 && p_filesz <= 65536 {
+                    let mut note_data = Vec::new();
+                    let note_slice: &[u8] = if p_offset + p_filesz <= buffer.len() {
+                        &buffer[p_offset..p_offset + p_filesz]
+                    } else if let Some(p) = path {
+                        use std::io::{Read, Seek, SeekFrom};
+                        if let Ok(mut f) = std::fs::File::open(p) {
+                            if f.seek(SeekFrom::Start(p_offset as u64)).is_ok() {
+                                note_data.resize(p_filesz, 0);
+                                if f.read_exact(&mut note_data).is_ok() {
+                                    &note_data[..]
+                                } else {
+                                    &[]
+                                }
+                            } else {
+                                &[]
+                            }
+                        } else {
+                            &[]
+                        }
+                    } else {
+                        &[]
+                    };
+                    if !note_slice.is_empty() {
+                        parse_notes(note_slice, is_lsb, p_align, &mut build_id, &mut os_version);
+                        if os_version.is_none() && p_align != 4 {
+                            parse_notes(note_slice, is_lsb, 4, &mut build_id, &mut os_version);
+                        }
+                    }
                 }
             }
         }
     }
 
-    // Section headers stripped status
-    let shnum = if is_64 {
-        read_u16(buffer, 60).unwrap_or(0)
+    // Section headers stripped status (check SHT_SYMTAB = 2) and SHT_NOTE = 7
+    let (shoff, shentsize, shnum) = if is_64 {
+        let shoff = read_u64(buffer, 40).unwrap_or(0) as usize;
+        let shentsize = read_u16(buffer, 58).unwrap_or(0) as usize;
+        let shnum = read_u16(buffer, 60).unwrap_or(0) as usize;
+        (shoff, shentsize, shnum)
     } else {
-        read_u16(buffer, 48).unwrap_or(0)
+        let shoff = read_u32(buffer, 32).unwrap_or(0) as usize;
+        let shentsize = read_u16(buffer, 46).unwrap_or(0) as usize;
+        let shnum = read_u16(buffer, 48).unwrap_or(0) as usize;
+        (shoff, shentsize, shnum)
     };
+
+    let mut has_symtab = false;
+    let scan_shnum = shnum.min(config.params.elf_shnum);
+    if shoff > 0 && shentsize >= 8 {
+        let mut file_opt = path.and_then(|p| std::fs::File::open(p).ok());
+        use std::io::{Read, Seek, SeekFrom};
+
+        for i in 0..scan_shnum {
+            let sh_start = shoff + i * shentsize;
+            let mut sh_buf = [0u8; 64];
+            let sh_slice: &[u8] = if sh_start + shentsize <= buffer.len() {
+                &buffer[sh_start..sh_start + shentsize]
+            } else if let Some(ref mut f) = file_opt {
+                if f.seek(SeekFrom::Start(sh_start as u64)).is_ok()
+                    && f.read_exact(&mut sh_buf[..shentsize.min(64)]).is_ok()
+                {
+                    &sh_buf[..shentsize.min(64)]
+                } else {
+                    continue;
+                }
+            } else {
+                continue;
+            };
+
+            let sh_type = if sh_slice.len() >= 8 {
+                read_u32(sh_slice, 4).unwrap_or(0)
+            } else {
+                0
+            };
+
+            if sh_type == 2 {
+                has_symtab = true;
+            } else if sh_type == 7 {
+                // SHT_NOTE
+                let (s_offset, s_size, s_align) = if is_64 {
+                    if sh_slice.len() >= 56 {
+                        (
+                            read_u64(sh_slice, 24).unwrap_or(0) as usize,
+                            read_u64(sh_slice, 32).unwrap_or(0) as usize,
+                            read_u64(sh_slice, 48).unwrap_or(4) as usize,
+                        )
+                    } else {
+                        (0, 0, 4)
+                    }
+                } else {
+                    if sh_slice.len() >= 36 {
+                        (
+                            read_u32(sh_slice, 16).unwrap_or(0) as usize,
+                            read_u32(sh_slice, 20).unwrap_or(0) as usize,
+                            read_u32(sh_slice, 32).unwrap_or(4) as usize,
+                        )
+                    } else {
+                        (0, 0, 4)
+                    }
+                };
+
+                if s_size > 0 && s_size <= 65536 {
+                    let mut note_data = Vec::new();
+                    let note_slice: &[u8] = if s_offset + s_size <= buffer.len() {
+                        &buffer[s_offset..s_offset + s_size]
+                    } else if let Some(ref mut f) = file_opt {
+                        if f.seek(SeekFrom::Start(s_offset as u64)).is_ok() {
+                            note_data.resize(s_size, 0);
+                            if f.read_exact(&mut note_data).is_ok() {
+                                &note_data[..]
+                            } else {
+                                &[]
+                            }
+                        } else {
+                            &[]
+                        }
+                    } else {
+                        &[]
+                    };
+
+                    if !note_slice.is_empty() {
+                        parse_notes(note_slice, is_lsb, s_align, &mut build_id, &mut os_version);
+                        if os_version.is_none() && s_align != 4 {
+                            parse_notes(note_slice, is_lsb, 4, &mut build_id, &mut os_version);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     let stripped_desc = if shnum == 0 {
-        "stripped"
-    } else {
+        "no section header"
+    } else if has_symtab {
         "not stripped"
+    } else {
+        "stripped"
+    };
+
+    let is_pie = interpreter.is_some() || has_pie_flag;
+    let (type_desc, mime_type) = match e_type {
+        1 => ("relocatable", "application/x-object"),
+        2 => ("executable", "application/x-executable"),
+        3 => {
+            if is_pie {
+                ("pie executable", "application/x-pie-executable")
+            } else {
+                ("shared object", "application/x-sharedlib")
+            }
+        }
+        4 => ("core file", "application/x-coredump"),
+        _ => ("unknown type", "application/x-executable"),
     };
 
     let mut desc = format!("ELF {class_desc} {data_desc} {type_desc}, {machine_desc}, version 1 ({osabi_desc})");
 
-    if let Some(interp) = interpreter {
-        desc.push_str(&format!(", dynamically linked, interpreter {interp}"));
+    if has_dynamic {
+        if has_pie_flag && need_count == 0 {
+            desc.push_str(", static-pie linked");
+        } else {
+            desc.push_str(", dynamically linked");
+        }
     } else if e_type == 2 || e_type == 3 {
         desc.push_str(", statically linked");
+    }
+
+    if let Some(interp) = interpreter {
+        desc.push_str(&format!(", interpreter {interp}"));
     }
 
     if let Some(bid) = build_id {
@@ -204,10 +393,12 @@ pub fn test_elf(buffer: &[u8], config: &Config) -> Option<SpecializedResult> {
 fn parse_notes(
     slice: &[u8],
     is_lsb: bool,
+    align: usize,
     build_id: &mut Option<String>,
     os_version: &mut Option<String>,
 ) {
     let mut pos = 0;
+    let align = if align < 4 { 4 } else { align };
     while pos + 12 <= slice.len() {
         let namesz = if is_lsb {
             u32::from_le_bytes([slice[pos], slice[pos + 1], slice[pos + 2], slice[pos + 3]]) as usize
@@ -226,17 +417,21 @@ fn parse_notes(
         };
         pos += 12;
 
-        let name_aligned = (namesz + 3) & !3;
-        let desc_aligned = (descsz + 3) & !3;
+        let name_aligned = ((namesz + align - 1) / align) * align;
+        let desc_aligned = ((descsz + align - 1) / align) * align;
 
-        if pos + name_aligned + desc_aligned > slice.len() {
+        if pos + namesz > slice.len() {
             break;
         }
 
         let name = &slice[pos..pos + namesz];
-        let desc = &slice[pos + name_aligned..pos + name_aligned + descsz];
+        let desc_start = pos + name_aligned;
+        if desc_start + descsz > slice.len() {
+            break;
+        }
+        let desc = &slice[desc_start..desc_start + descsz];
 
-        if name == b"GNU\0" {
+        if name == b"GNU\0" || name == b"GNU" {
             if n_type == 3 && build_id.is_none() {
                 // NT_GNU_BUILD_ID
                 let hex: String = desc.iter().map(|b| format!("{b:02x}")).collect();

@@ -30,7 +30,7 @@ pub fn test_json(buffer: &[u8]) -> Option<SpecializedResult> {
                 description: "New Line Delimited JSON text data".to_string(),
                 mime_type: "application/x-ndjson".to_string(),
                 mime_encoding: "us-ascii".to_string(),
-                extensions: "jsonl/ndjson".to_string(),
+                extensions: "???".to_string(),
                 apple: "TEXTJSON".to_string(),
             });
         }
@@ -43,7 +43,7 @@ pub fn test_json(buffer: &[u8]) -> Option<SpecializedResult> {
             description: "JSON text data".to_string(),
             mime_type: "application/json".to_string(),
             mime_encoding: "us-ascii".to_string(),
-            extensions: "json".to_string(),
+            extensions: "???".to_string(),
             apple: "TEXTJSON".to_string(),
         });
     }

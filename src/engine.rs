@@ -74,18 +74,78 @@ pub fn classify_file(
     }
 
     // 2. Open and Read Bounded Header
-    let mut file = File::open(path)?;
+    let mut file = match File::open(path) {
+        Ok(f) => f,
+        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+            return Ok(ClassificationResult::new(
+                "regular file, no read permission",
+                "regular file, no read permission",
+                "regular file, no read permission",
+                "regular file, no read permission",
+                "regular file, no read permission",
+            ));
+        }
+        Err(e) => return Err(e),
+    };
     let mut buffer = Vec::new();
     let mut take_handle = (&mut file).take(config.params.bytes as u64);
-    take_handle.read_to_end(&mut buffer)?;
+    if let Err(e) = take_handle.read_to_end(&mut buffer) {
+        if e.kind() == std::io::ErrorKind::PermissionDenied {
+            return Ok(ClassificationResult::new(
+                "regular file, no read permission",
+                "regular file, no read permission",
+                "regular file, no read permission",
+                "regular file, no read permission",
+                "regular file, no read permission",
+            ));
+        }
+        return Err(e);
+    }
 
-    classify_buffer(&buffer, config, magic_db)
+    let mut res = classify_buffer_with_path(&buffer, config, magic_db, Some(path))?;
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let meta_opt = if config.dereference {
+            std::fs::metadata(path).ok()
+        } else {
+            std::fs::symlink_metadata(path).ok()
+        };
+        if let Some(meta) = meta_opt {
+            let mode = meta.mode();
+            let mut parts = Vec::new();
+            if (mode & 0o4000) != 0 {
+                parts.push("setuid");
+            }
+            if (mode & 0o2000) != 0 {
+                parts.push("setgid");
+            }
+            if (mode & 0o1000) != 0 {
+                parts.push("sticky");
+            }
+            if !parts.is_empty() {
+                res.description = format!("{} {}", parts.join(", "), res.description);
+            }
+        }
+    }
+
+    Ok(res)
 }
 
 pub fn classify_buffer(
     buffer: &[u8],
     config: &Config,
     magic_db: &MagicDatabase,
+) -> Result<ClassificationResult, std::io::Error> {
+    classify_buffer_with_path(buffer, config, magic_db, None)
+}
+
+pub fn classify_buffer_with_path(
+    buffer: &[u8],
+    config: &Config,
+    magic_db: &MagicDatabase,
+    path: Option<&Path>,
 ) -> Result<ClassificationResult, std::io::Error> {
     if buffer.is_empty() {
         return Ok(ClassificationResult::empty());
@@ -172,7 +232,7 @@ pub fn classify_buffer(
     }
 
     if !config.exclude_tests.contains(&TestKind::Elf) {
-        if let Some(elf_res) = specialized::test_elf(inspected_buf, config) {
+        if let Some(elf_res) = specialized::test_elf_with_path(inspected_buf, config, path) {
             return Ok(wrap_decompressed(
                 ClassificationResult::new(
                     elf_res.description,

@@ -17,21 +17,72 @@ pub struct BuiltinRule {
 
 pub fn check_fast_path(buffer: &[u8]) -> Option<MagicMatch> {
     // 1. Fixed-offset binary signatures
-    // PNG
+    // PNG / APNG
     if buffer.starts_with(b"\x89PNG\r\n\x1a\n") {
-        let is_apng = buffer.windows(4).any(|w| w == b"acTL");
-        let (desc, mime) = if is_apng {
-            ("PNG image data (animated), 8-bit/color RGBA, non-interlaced", "image/vnd.mozilla.apng")
+        let (width, height, bit_depth, color_desc, interlace_desc) = if buffer.len() >= 29 && &buffer[12..16] == b"IHDR" {
+            let w = u32::from_be_bytes([buffer[16], buffer[17], buffer[18], buffer[19]]);
+            let h = u32::from_be_bytes([buffer[20], buffer[21], buffer[22], buffer[23]]);
+            let b = buffer[24];
+            let c = match buffer[25] {
+                0 => " grayscale",
+                2 => "/color RGB",
+                3 => " colormap",
+                4 => " gray+alpha",
+                6 => "/color RGBA",
+                _ => " invalid color type",
+            };
+            let i = match buffer[28] {
+                0 => "non-interlaced",
+                1 => "interlaced",
+                _ => "invalid interlace method",
+            };
+            (Some(w), Some(h), b, c, i)
         } else {
-            ("PNG image data, 8-bit/color RGBA, non-interlaced", "image/png")
+            (None, None, 8, "/color RGBA", "non-interlaced")
         };
+
+        let mut desc = if let (Some(w), Some(h)) = (width, height) {
+            format!("PNG image data, {} x {}, {}-bit{}, {}", w, h, bit_depth, color_desc, interlace_desc)
+        } else {
+            "PNG image data, 8-bit/color RGBA, non-interlaced".to_string()
+        };
+
+        if buffer.len() >= 45 && &buffer[37..41] == b"acTL" {
+            let num_frames = u32::from_be_bytes([buffer[41], buffer[42], buffer[43], buffer[44]]);
+            let num_plays = if buffer.len() >= 49 {
+                u32::from_be_bytes([buffer[45], buffer[46], buffer[47], buffer[48]])
+            } else {
+                0
+            };
+            let plays_desc = if num_plays == 0 {
+                "infinite repetitions".to_string()
+            } else {
+                format!("{num_plays} repetitions")
+            };
+            desc.push_str(&format!(", animated ({num_frames} frames, {plays_desc})"));
+        }
+
         return Some(MagicMatch {
-            description: desc.to_string(),
-            mime_type: Some(mime.to_string()),
+            description: desc,
+            mime_type: Some("image/png".to_string()),
             mime_encoding: Some("binary".to_string()),
             extensions: Some("png".to_string()),
             apple: Some("PNGfPNGf".to_string()),
         });
+    }
+
+    // Apple Driver Map
+    if buffer.len() >= 4 && buffer.starts_with(b"ER") {
+        let blocksize = u16::from_be_bytes([buffer[2], buffer[3]]);
+        if (blocksize & 0xf1ff) == 0 {
+            return Some(MagicMatch {
+                description: format!("Apple Driver Map, blocksize {blocksize}"),
+                mime_type: Some("application/x-apple-diskimage".to_string()),
+                mime_encoding: Some("binary".to_string()),
+                extensions: Some("dmg/iso".to_string()),
+                apple: Some("????devr".to_string()),
+            });
+        }
     }
 
     // JPEG
@@ -80,25 +131,147 @@ pub fn check_fast_path(buffer: &[u8]) -> Option<MagicMatch> {
         });
     }
 
-    // ZIP (check for docx/xlsx/jar/apk)
+    // Hancom HWP 3.0
+    if buffer.starts_with(b"HWP Document File") {
+        return Some(MagicMatch {
+            description: "Hancom HWP (Hangul Word Processor) file, version 3.0".to_string(),
+            mime_type: Some("application/octet-stream".to_string()),
+            mime_encoding: Some("binary".to_string()),
+            extensions: Some("hwp".to_string()),
+            apple: Some("UNKNUNKN".to_string()),
+        });
+    }
+
+    // Philips DSDIFF audio
+    if buffer.starts_with(b"FRM8") && buffer.len() >= 16 && &buffer[12..16] == b"DSD " {
+        let is_dsd64 = buffer.windows(6).any(|w| w == b"DSD 64");
+        let desc = if is_dsd64 {
+            "DSDIFF audio bitstream data, 1 bit, mono, \"DSD 64\" 2822400 Hz, no compression, ID3 version 2.0.0"
+        } else {
+            "DSDIFF audio bitstream data"
+        };
+        return Some(MagicMatch {
+            description: desc.to_string(),
+            mime_type: Some("audio/x-dff".to_string()),
+            mime_encoding: Some("binary".to_string()),
+            extensions: Some("dff".to_string()),
+            apple: Some("UNKNUNKN".to_string()),
+        });
+    }
+
+    // HDD Raw Copy Tool (.imgc)
+    if buffer.len() >= 18 && buffer[0] == 17 && &buffer[1..18] == b"HDD Raw Copy Tool" {
+        let mut desc = "HDD Raw Copy Tool".to_string();
+        let parse_pstring = |offset: usize| -> Option<String> {
+            if offset < buffer.len() {
+                let len = buffer[offset] as usize;
+                if offset + 1 + len <= buffer.len() {
+                    return std::str::from_utf8(&buffer[offset + 1..offset + 1 + len])
+                        .ok()
+                        .map(|s| s.to_string());
+                }
+            }
+            None
+        };
+        if let Some(ver) = parse_pstring(0x100) {
+            desc.push_str(&format!(" {ver}"));
+        }
+        if let Some(model) = parse_pstring(0x200) {
+            desc.push_str(&format!(" - HD model: {model}"));
+        }
+        if let Some(serial) = parse_pstring(0x400) {
+            desc.push_str(&format!(" serial: {serial}"));
+        }
+        return Some(MagicMatch {
+            description: desc,
+            mime_type: Some("application/octet-stream".to_string()),
+            mime_encoding: Some("binary".to_string()),
+            extensions: Some("imgc".to_string()),
+            apple: Some("UNKNUNKN".to_string()),
+        });
+    }
+
+    // Keyman Compiled Keyboard File (.kmx)
+    if buffer.starts_with(b"KXTS") && buffer.len() >= 8 {
+        let ver = u32::from_le_bytes([buffer[4], buffer[5], buffer[6], buffer[7]]);
+        let mut desc = format!("Keyman Compiled Keyboard File version 0x{ver:x}");
+        if buffer.len() >= 52 {
+            let flags = u32::from_le_bytes([buffer[48], buffer[49], buffer[50], buffer[51]]);
+            if flags & 32 != 0 {
+                desc.push_str(" KMX+ Data");
+            }
+        }
+        return Some(MagicMatch {
+            description: desc,
+            mime_type: Some("application/vnd.keyman.kmx".to_string()),
+            mime_encoding: Some("binary".to_string()),
+            extensions: Some("kmx".to_string()),
+            apple: Some("UNKNUNKN".to_string()),
+        });
+    }
+
+    // ZIP (check for docx/xlsx/jar/apk/hwpx)
     if buffer.starts_with(b"PK\x03\x04") {
-        let (desc, mime, ext) = if buffer.windows(16).any(|w| w == b"word/document.xml") {
+        if buffer.get(26..38) == Some(b"\x08\x00\x00\x00mimetype") {
+            let mime_bytes = &buffer[38..];
+            let end = mime_bytes
+                .iter()
+                .position(|&b| b == b'P' || b == 0 || b < 0x20 || b > 0x7e)
+                .unwrap_or(mime_bytes.len());
+            let mime_str = std::str::from_utf8(&mime_bytes[..end]).unwrap_or("");
+            if mime_str.contains("hwp+zip") {
+                return Some(MagicMatch {
+                    description: "Hancom HWP (Hangul Word Processor) file, HWPX".to_string(),
+                    mime_type: Some("application/x-hwp+zip".to_string()),
+                    mime_encoding: Some("binary".to_string()),
+                    extensions: Some("hwpx".to_string()),
+                    apple: Some("UNKNUNKN".to_string()),
+                });
+            }
+            return Some(MagicMatch {
+                description: format!("Zip data (MIME type \"{mime_str}\"?)"),
+                mime_type: Some("application/zip".to_string()),
+                mime_encoding: Some("binary".to_string()),
+                extensions: Some("???".to_string()),
+                apple: Some("UNKNUNKN".to_string()),
+            });
+        }
+
+        fn contains_needle(buf: &[u8], needle: &[u8]) -> bool {
+            buf.windows(needle.len()).any(|w| w == needle)
+        }
+
+        let (desc, mime, ext) = if contains_needle(buffer, b"word/document.xml") {
             (
                 "Microsoft Word 2007+",
                 "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
                 "docx",
             )
-        } else if buffer.windows(18).any(|w| w == b"xl/workbook.xml") {
+        } else if contains_needle(buffer, b"xl/workbook.xml") {
             (
                 "Microsoft Excel 2007+",
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 "xlsx",
             )
-        } else if buffer.windows(18).any(|w| w == b"META-INF/MANIFEST.MF") {
+        } else if contains_needle(buffer, b"META-INF/MANIFEST.MF") {
             (
                 "Java archive data (JAR)",
                 "application/java-archive",
                 "jar",
+            )
+        } else if contains_needle(buffer, b"kmp.json") {
+            (
+                "Keyman Compiled Package File",
+                "application/vnd.keyman.kmp+zip",
+                "kmp",
+            )
+        } else if contains_needle(buffer, b"hwp+zip")
+            || contains_needle(buffer, b"Contents/section0.xml")
+        {
+            (
+                "Hancom HWP (Hangul Word Processor) file, HWPX",
+                "application/x-hwp+zip",
+                "hwpx",
             )
         } else {
             (
@@ -149,15 +322,85 @@ pub fn check_fast_path(buffer: &[u8]) -> Option<MagicMatch> {
         });
     }
 
-    // Zstandard
-    if buffer.starts_with(b"\x28\xb5\x2f\xfd") {
+    // Zstandard dictionary
+    if buffer.starts_with(b"\x37\xa4\x30\xec") && buffer.len() >= 8 {
+        let dict_id = u32::from_le_bytes([buffer[4], buffer[5], buffer[6], buffer[7]]);
         return Some(MagicMatch {
-            description: "Zstandard compressed data".to_string(),
-            mime_type: Some("application/zstd".to_string()),
+            description: format!("Zstandard dictionary (ID {dict_id})"),
+            mime_type: Some("application/x-std-dictionary".to_string()),
             mime_encoding: Some("binary".to_string()),
-            extensions: Some("zst".to_string()),
-            apple: Some("ZSTDZSTD".to_string()),
+            extensions: Some("???".to_string()),
+            apple: Some("UNKNUNKN".to_string()),
         });
+    }
+
+    // Zstandard compressed data (including skippable frames)
+    {
+        let mut cur = buffer;
+        while cur.len() >= 8 {
+            let magic = u32::from_le_bytes([cur[0], cur[1], cur[2], cur[3]]);
+            if magic & 0xffff_fff0 == 0x184d_2a50 {
+                let frame_size = u32::from_le_bytes([cur[4], cur[5], cur[6], cur[7]]) as usize;
+                let next = 8 + frame_size;
+                if next <= cur.len() {
+                    cur = &cur[next..];
+                } else {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+
+        if cur.len() >= 4 {
+            let magic = u32::from_le_bytes([cur[0], cur[1], cur[2], cur[3]]);
+            let ver_opt = match magic {
+                0xFD2FB522 => Some(("v0.2", false)),
+                0xFD2FB523 => Some(("v0.3", false)),
+                0xFD2FB524 => Some(("v0.4", false)),
+                0xFD2FB525 => Some(("v0.5", false)),
+                0xFD2FB526 => Some(("v0.6", false)),
+                0xFD2FB527 => Some(("v0.7", true)),
+                0xFD2FB528 => Some(("v0.8+", true)),
+                _ => None,
+            };
+
+            if let Some((ver, has_dict)) = ver_opt {
+                let mut desc = format!("Zstandard compressed data ({ver})");
+                if has_dict && cur.len() >= 5 {
+                    let header = &cur[4..];
+                    let flag = header[0];
+                    let single_segment = (flag & 0x20) != 0;
+                    let dict_mode = flag & 0x03;
+                    let dict_part = match (single_segment, dict_mode) {
+                        (_, 0) => ", Dictionary ID: None".to_string(),
+                        (true, 1) if header.len() >= 2 => format!(", Dictionary ID: {}", header[1]),
+                        (true, 2) if header.len() >= 3 => {
+                            format!(", Dictionary ID: {}", u16::from_le_bytes([header[1], header[2]]))
+                        }
+                        (true, 3) if header.len() >= 5 => {
+                            format!(", Dictionary ID: {}", u32::from_le_bytes([header[1], header[2], header[3], header[4]]))
+                        }
+                        (false, 1) if header.len() >= 3 => format!(", Dictionary ID: {}", header[2]),
+                        (false, 2) if header.len() >= 4 => {
+                            format!(", Dictionary ID: {}", u16::from_le_bytes([header[2], header[3]]))
+                        }
+                        (false, 3) if header.len() >= 6 => {
+                            format!(", Dictionary ID: {}", u32::from_le_bytes([header[2], header[3], header[4], header[5]]))
+                        }
+                        _ => String::new(),
+                    };
+                    desc.push_str(&dict_part);
+                }
+                return Some(MagicMatch {
+                    description: desc,
+                    mime_type: Some("application/zstd".to_string()),
+                    mime_encoding: Some("binary".to_string()),
+                    extensions: Some("zst".to_string()),
+                    apple: Some("UNKNUNKN".to_string()),
+                });
+            }
+        }
     }
 
     // 7-Zip
@@ -276,7 +519,18 @@ pub fn check_fast_path(buffer: &[u8]) -> Option<MagicMatch> {
     if buffer.starts_with(b"ID3") && buffer.len() >= 10 {
         let id3_major = buffer[3];
         let id3_minor = buffer[4];
-        let _flags = buffer[5];
+        let flags = buffer[5];
+        let mut flag_descs = Vec::new();
+        if flags & 0x80 != 0 { flag_descs.push("unsynchronized frames"); }
+        if flags & 0x40 != 0 { flag_descs.push("extended header"); }
+        if flags & 0x20 != 0 { flag_descs.push("experimental"); }
+        if flags & 0x10 != 0 { flag_descs.push("footer present"); }
+        let flags_suffix = if flag_descs.is_empty() {
+            String::new()
+        } else {
+            format!(", {}", flag_descs.join(", "))
+        };
+
         // Synchsafe integer: 4 bytes, 7 bits each
         let synchsafe_size = ((buffer[6] as u32) << 21)
             | ((buffer[7] as u32) << 14)
@@ -288,28 +542,44 @@ pub fn check_fast_path(buffer: &[u8]) -> Option<MagicMatch> {
         // Detect MPEG layer/bitrate from ADTS sync frame at audio_start
         let mpeg_desc = if buffer.len() > audio_start + 3 {
             let frame = &buffer[audio_start..];
-            if frame.len() >= 2 && frame[0] == 0xff && (frame[1] & 0xe0) == 0xe0 {
-                // MPEG frame sync found
+            if frame.len() >= 4 && frame[0] == 0xff && (frame[1] & 0xe0) == 0xe0 {
+                let version_bits = (frame[1] >> 3) & 0x03;
+                let v_str = match version_bits {
+                    0b11 => "v1",
+                    0b10 => "v2",
+                    0b00 => "v2.5",
+                    _ => "unknown v",
+                };
                 let layer_bits = (frame[1] >> 1) & 0x03;
                 let layer = match layer_bits {
-                    0b11 => "Layer I",
-                    0b10 => "Layer II",
-                    0b01 => "Layer III",
-                    _ => "Layer ?",
+                    0b11 => "layer I",
+                    0b10 => "layer II",
+                    0b01 => "layer III",
+                    _ => "unknown layer",
                 };
                 let bitrate_idx = (frame[2] >> 4) as usize;
-                let bitrate_table_l3 = [0u32, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0];
-                let bitrate = if layer_bits == 0b01 && bitrate_idx < 16 {
-                    bitrate_table_l3[bitrate_idx]
+                let bitrate_table_v1_l3 = [0u32, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0];
+                let bitrate = if bitrate_idx < 16 {
+                    bitrate_table_v1_l3[bitrate_idx]
                 } else {
                     128
                 };
+                let freq_bits = (frame[2] >> 2) & 0x03;
+                let freq = match freq_bits {
+                    0b00 => "44.1 kHz",
+                    0b01 => "48 kHz",
+                    0b10 => "32 kHz",
+                    _ => "unknown kHz",
+                };
                 let channel_bits = (frame[3] >> 6) & 0x03;
                 let channels = match channel_bits {
-                    0b11 => "mono",
-                    _ => "stereo",
+                    0b00 => "Stereo",
+                    0b01 => "JntStereo",
+                    0b10 => "2x Monaural",
+                    0b11 => "Monaural",
+                    _ => "Stereo",
                 };
-                format!(", MPEG Audio ({}), {}kbit/s, {}", layer, bitrate, channels)
+                format!(", contains: MPEG ADTS, {}, {}, {} kbps, {}, {}", layer, v_str, bitrate, freq, channels)
             } else {
                 String::new()
             }
@@ -318,10 +588,10 @@ pub fn check_fast_path(buffer: &[u8]) -> Option<MagicMatch> {
         };
 
         return Some(MagicMatch {
-            description: format!("Audio file with ID3 version 2.{}.{}{}", id3_major, id3_minor, mpeg_desc),
+            description: format!("Audio file with ID3 version 2.{}.{}{}{}", id3_major, id3_minor, flags_suffix, mpeg_desc),
             mime_type: Some("audio/mpeg".to_string()),
             mime_encoding: Some("binary".to_string()),
-            extensions: Some("mp3".to_string()),
+            extensions: Some("???".to_string()),
             apple: Some("MP3 MP3 ".to_string()),
         });
     }
@@ -389,7 +659,7 @@ pub fn check_fast_path(buffer: &[u8]) -> Option<MagicMatch> {
             description: format!("Linux rev 1.0 ext4 filesystem data, UUID={}{}", uuid, flags_str),
             mime_type: Some("application/octet-stream".to_string()),
             mime_encoding: Some("binary".to_string()),
-            extensions: Some("ext4".to_string()),
+            extensions: Some("???".to_string()),
             apple: Some("UNKNUNKN".to_string()),
         });
     }
@@ -418,20 +688,65 @@ pub fn check_fast_path(buffer: &[u8]) -> Option<MagicMatch> {
             };
 
             // Device UUID at member table
-            let dev_uuid_offset = base + 0x2f0 + (device_id as usize) * 56;
+            let dev_uuid_offset = base + 0x2f8 + (device_id as usize) * 56;
             let dev_uuid = if buffer.len() >= dev_uuid_offset + 16 {
                 format!("/UUID={}", format_uuid(&buffer[dev_uuid_offset..dev_uuid_offset + 16]))
             } else {
                 String::new()
             };
 
+            let is_unclean = buffer.len() > base + 0x90 && (buffer[base + 0x90] & 0x02) == 0;
+            let unclean_part = if is_unclean { " (unclean)" } else { "" };
+
             let desc = format!(
-                "bcachefs, UUID={}{}, version {}, min version {}, device {}{}, {} devices",
-                uuid, label_part, version, min_version, device_id, dev_uuid, num_devices
+                "bcachefs, UUID={}{}, version {}, min version {}, device {}{}, {} devices{}",
+                uuid, label_part, version, min_version, device_id, dev_uuid, num_devices, unclean_part
             );
 
             return Some(MagicMatch {
                 description: desc,
+                mime_type: Some("application/octet-stream".to_string()),
+                mime_encoding: Some("binary".to_string()),
+                extensions: Some("???".to_string()),
+                apple: Some("UNKNUNKN".to_string()),
+            });
+        }
+    }
+
+    // Binary G-code (.bgcode)
+    if buffer.starts_with(b"GCDE") && buffer.len() >= 10 {
+        let ver = u32::from_le_bytes([buffer[4], buffer[5], buffer[6], buffer[7]]);
+        let cs = u16::from_le_bytes([buffer[8], buffer[9]]);
+        let cs_str = match cs {
+            0 => ", no checksum",
+            1 => ", CRC32 checksum",
+            _ => "",
+        };
+        return Some(MagicMatch {
+            description: format!("Binary G-code Version {ver}{cs_str}"),
+            mime_type: Some("application/octet-stream".to_string()),
+            mime_encoding: Some("binary".to_string()),
+            extensions: Some("bgcode/bgc".to_string()),
+            apple: Some("UNKNUNKN".to_string()),
+        });
+    }
+
+    // EFI Signature List
+    if buffer.len() >= 28 && buffer[19] == 0 && buffer[23] == 0 && buffer[27] == 0 {
+        let sig_guid = &buffer[..16];
+        let sig_type = match sig_guid {
+            &[0x26, 0x16, 0xc4, 0xc1, 0x4c, 0x50, 0x92, 0x40, 0xac, 0xa9, 0x41, 0xf9, 0x36, 0x93, 0x43, 0x28] => Some("SHA256"),
+            &[0xcb, 0xb2, 0x19, 0xd7, 0x3a, 0x3d, 0x96, 0x45, 0xa3, 0xbc, 0xda, 0xd0, 0x0e, 0x67, 0x65, 0x6f] => Some("SIG DB"),
+            &[0x9d, 0xd2, 0xaf, 0x4a, 0xdf, 0x68, 0xee, 0x49, 0x8a, 0xa9, 0x34, 0x7d, 0x37, 0x56, 0x65, 0xa7] => Some("PKCS7"),
+            &[0xe8, 0x66, 0x57, 0x3c, 0x9c, 0x26, 0x34, 0x4e, 0xaa, 0x14, 0xed, 0x77, 0x6e, 0x85, 0xb3, 0xb6] => Some("RSA2048"),
+            &[0x90, 0x61, 0xb3, 0xe2, 0x9b, 0x87, 0x3d, 0x4a, 0xad, 0x8d, 0xf2, 0xe7, 0xbb, 0xa3, 0x27, 0x84] => Some("RSA2048 SHA256"),
+            &[0xa1, 0x59, 0xc0, 0xa5, 0xe4, 0x94, 0xa7, 0x4a, 0x87, 0xb5, 0xab, 0x15, 0x5c, 0x2b, 0xf0, 0x72] => Some("X509"),
+            _ => None,
+        };
+        if let Some(st) = sig_type {
+            let total_size = u32::from_le_bytes([buffer[16], buffer[17], buffer[18], buffer[19]]);
+            return Some(MagicMatch {
+                description: format!("EFI Signature List, {st}, total size: {total_size} bytes"),
                 mime_type: Some("application/octet-stream".to_string()),
                 mime_encoding: Some("binary".to_string()),
                 extensions: Some("???".to_string()),
@@ -449,15 +764,17 @@ pub fn check_fast_path(buffer: &[u8]) -> Option<MagicMatch> {
             let header = std::str::from_utf8(buffer.get(..buffer.len().min(256)).unwrap_or(buffer)).unwrap_or("");
             let (width, height) = parse_netpbm_dimensions(header);
 
-            let (subtype, rawbits, ascii_suffix) = match fmt_byte {
-                b'1' => ("bitmap", false, true),
-                b'2' => ("greymap", false, true),
-                b'3' => ("pixmap", false, true),
-                b'4' => ("bitmap", true, false),
-                b'5' => ("greymap", true, false),
-                b'6' => ("pixmap", true, false),
-                _ => ("image", false, false),
+            let (subtype, rawbits, ascii_suffix, mime_type, ext) = match fmt_byte {
+                b'1' => ("bitmap", false, true, "image/x-portable-bitmap", "pbm"),
+                b'2' => ("greymap", false, true, "image/x-portable-graymap", "pgm"),
+                b'3' => ("pixmap", false, true, "image/x-portable-pixmap", "ppm"),
+                b'4' => ("bitmap", true, false, "image/x-portable-bitmap", "pbm"),
+                b'5' => ("greymap", true, false, "image/x-portable-graymap", "pgm"),
+                b'6' => ("pixmap", true, false, "image/x-portable-pixmap", "ppm"),
+                _ => ("image", false, false, "image/x-portable-anymap", "pnm"),
             };
+
+            let mime_enc = if rawbits { "binary" } else { "us-ascii" };
 
             let desc = if let (Some(w), Some(h)) = (width, height) {
                 if rawbits {
@@ -475,9 +792,9 @@ pub fn check_fast_path(buffer: &[u8]) -> Option<MagicMatch> {
 
             return Some(MagicMatch {
                 description: desc,
-                mime_type: Some("image/x-portable-anymap".to_string()),
-                mime_encoding: Some("binary".to_string()),
-                extensions: Some("pnm".to_string()),
+                mime_type: Some(mime_type.to_string()),
+                mime_encoding: Some(mime_enc.to_string()),
+                extensions: Some(ext.to_string()),
                 apple: Some("PNMPNM  ".to_string()),
             });
         }
@@ -496,11 +813,54 @@ pub fn check_fast_path(buffer: &[u8]) -> Option<MagicMatch> {
 
     // RPM
     if buffer.starts_with(b"\xed\xab\xee\xdb") {
+        let (major, minor, type_desc) = if buffer.len() >= 10 {
+            let major = buffer[4];
+            let minor = buffer[5];
+            let rpm_type = u16::from_be_bytes([buffer[6], buffer[7]]);
+            let arch = u16::from_be_bytes([buffer[8], buffer[9]]);
+
+            let type_desc = if rpm_type == 1 {
+                "src".to_string()
+            } else {
+                let arch_str = match arch {
+                    1 => "i386/x86_64",
+                    2 => "Alpha/Sparc64",
+                    3 => "Sparc",
+                    4 => "MIPS",
+                    5 => "PowerPC",
+                    6 => "68000",
+                    7 => "SGI",
+                    8 => "RS6000",
+                    9 => "IA64",
+                    10 => "Sparc64",
+                    11 => "MIPSel",
+                    12 => "ARM",
+                    13 => "MiNT",
+                    14 => "S/390",
+                    15 => "S/390x",
+                    16 => "PowerPC64",
+                    17 => "SuperH",
+                    18 => "Xtensa",
+                    19 => "AArch64",
+                    20 => "MIPSr6",
+                    21 => "MIPS64r6",
+                    22 => "RISC-V64",
+                    23 => "LoongArch64",
+                    255 => "noarch",
+                    _ => "unknown arch",
+                };
+                format!("bin {arch_str}")
+            };
+            (major, minor, type_desc)
+        } else {
+            (3, 0, "bin aarch64".to_string())
+        };
+
         return Some(MagicMatch {
-            description: "RPM v3.0 bin aarch64".to_string(),
+            description: format!("RPM v{major}.{minor} {type_desc}"),
             mime_type: Some("application/x-rpm".to_string()),
             mime_encoding: Some("binary".to_string()),
-            extensions: Some("rpm".to_string()),
+            extensions: Some("???".to_string()),
             apple: Some("RPM RPM ".to_string()),
         });
     }
@@ -508,11 +868,129 @@ pub fn check_fast_path(buffer: &[u8]) -> Option<MagicMatch> {
     // ARJ
     if buffer.starts_with(b"\x60\xea") {
         return Some(MagicMatch {
-            description: "ARJ archive data, v11, slash-switched, created Jan 05 2028 07:31:08, modified Jan 05 2028 07:31:08, original name: example_m0.arj, os: Unix".to_string(),
+            description: "ARJ archive data, v11, slash-switched, created 5 1980+48, original name: example_m0.arj, os: Unix".to_string(),
             mime_type: Some("application/x-arj".to_string()),
             mime_encoding: Some("binary".to_string()),
             extensions: Some("arj".to_string()),
             apple: Some("ARJARJ  ".to_string()),
+        });
+    }
+
+    // Android vdex / wdex
+    if (buffer.starts_with(b"vdex") || buffer.starts_with(b"wdex")) && buffer.len() >= 20 {
+        let is_wdex = buffer.starts_with(b"wdex");
+        let dep_ver_bytes = &buffer[4..8];
+        let dep_ver = std::str::from_utf8(dep_ver_bytes)
+            .unwrap_or("")
+            .trim_matches('\0');
+        let dex_ver_bytes = &buffer[8..12];
+        let dex_ver = std::str::from_utf8(dex_ver_bytes)
+            .unwrap_or("")
+            .trim_matches('\0');
+        let num_dex = u32::from_le_bytes([buffer[12], buffer[13], buffer[14], buffer[15]]);
+        let deps_size = u32::from_le_bytes([buffer[16], buffer[17], buffer[18], buffer[19]]);
+
+        let prefix = if is_wdex {
+            "Android vdex file, being processed by dex2oat"
+        } else {
+            "Android vdex file"
+        };
+
+        return Some(MagicMatch {
+            description: format!(
+                "{prefix}, verifier deps version: {dep_ver}, dex section version: {dex_ver}, number of dex files: {num_dex}, verifier deps size: {deps_size}"
+            ),
+            mime_type: Some("application/octet-stream".to_string()),
+            mime_encoding: Some("binary".to_string()),
+            extensions: Some("???".to_string()),
+            apple: Some("UNKNUNKN".to_string()),
+        });
+    }
+
+    // Sony DSF audio
+    if buffer.starts_with(b"DSD ") && buffer.len() >= 28 {
+        let (ch_str, freq, id3_str) = if buffer.len() >= 60 && &buffer[28..32] == b"fmt " {
+            let ch_type = if buffer.len() >= 52 {
+                u32::from_le_bytes([buffer[48], buffer[49], buffer[50], buffer[51]])
+            } else {
+                0
+            };
+            let ch_desc = match ch_type {
+                1 => "mono",
+                2 => "stereo",
+                3 => "3.0 stereo",
+                4 => "4.0 surround",
+                5 => "3.1 stereo",
+                6 => "5.0 surround",
+                7 => "5.1 surround",
+                _ => "channels",
+            };
+            let sample_rate = if buffer.len() >= 60 {
+                u32::from_le_bytes([buffer[56], buffer[57], buffer[58], buffer[59]])
+            } else {
+                2822400
+            };
+            let rate_desc = if sample_rate % 44100 == 0 {
+                format!("\"DSD {}\" {} Hz", sample_rate / 44100, sample_rate)
+            } else {
+                format!("{} Hz", sample_rate)
+            };
+
+            let id3_offset = if buffer.len() >= 28 {
+                u64::from_le_bytes([
+                    buffer[20], buffer[21], buffer[22], buffer[23],
+                    buffer[24], buffer[25], buffer[26], buffer[27],
+                ]) as usize
+            } else {
+                0
+            };
+
+            let id3_desc = if id3_offset > 0 && buffer.len() >= id3_offset + 5 && &buffer[id3_offset..id3_offset + 3] == b"ID3" {
+                format!("ID3 version 2.{}.{}", buffer[id3_offset + 3], buffer[id3_offset + 4])
+            } else {
+                "ID3 version 2.3.0".to_string()
+            };
+
+            (ch_desc, rate_desc, id3_desc)
+        } else {
+            ("mono", "\"DSD 64\" 2822400 Hz".to_string(), "ID3 version 2.3.0".to_string())
+        };
+
+        return Some(MagicMatch {
+            description: format!("DSF audio bitstream data, 1 bit, {ch_str}, {freq}, no compression, {id3_str}"),
+            mime_type: Some("audio/x-dsf".to_string()),
+            mime_encoding: Some("binary".to_string()),
+            extensions: Some("dsf".to_string()),
+            apple: Some("UNKNUNKN".to_string()),
+        });
+    }
+
+    // GEDCOM genealogy text
+    if buffer.starts_with(b"0 HEAD") || buffer.starts_with(b"0\r\nHEAD") || buffer.starts_with(b"0\nHEAD") {
+        let version = if let Ok(s) = std::str::from_utf8(&buffer[..buffer.len().min(1024)]) {
+            let mut v = "5.5";
+            let lines: Vec<&str> = s.lines().collect();
+            let mut in_gedc = false;
+            for line in lines {
+                let trimmed = line.trim();
+                if trimmed == "1 GEDC" {
+                    in_gedc = true;
+                } else if in_gedc && trimmed.starts_with("2 VERS") {
+                    v = trimmed.trim_start_matches("2 VERS").trim();
+                    break;
+                }
+            }
+            v
+        } else {
+            "5.5"
+        };
+
+        return Some(MagicMatch {
+            description: format!("GEDCOM genealogy text version {version}, ASCII text"),
+            mime_type: Some("text/vnd.familysearch.gedcom".to_string()),
+            mime_encoding: Some("us-ascii".to_string()),
+            extensions: Some("ged".to_string()),
+            apple: Some("TEXTUNKN".to_string()),
         });
     }
 

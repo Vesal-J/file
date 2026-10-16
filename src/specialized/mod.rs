@@ -11,6 +11,6 @@ pub mod tar;
 
 pub use cdf::test_cdf;
 pub use csv::test_csv;
-pub use elf::{test_elf, SpecializedResult};
+pub use elf::{test_elf, test_elf_with_path, SpecializedResult};
 pub use json::test_json;
 pub use tar::test_tar;

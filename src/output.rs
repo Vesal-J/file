@@ -13,7 +13,9 @@ pub fn format_result(
     config: &Config,
     padding: usize,
 ) -> String {
-    let content = if config.apple {
+    let content = if res.description == "regular file, no read permission" {
+        "regular file, no read permission".to_string()
+    } else if config.apple {
         res.apple.clone()
     } else if config.extension {
         res.extensions.clone()
@@ -47,11 +49,11 @@ pub fn format_result(
             format!("{escaped_filename}\0{formatted_content}")
         } else {
             let pad_spaces = if padding > escaped_filename.len() && !config.no_pad {
-                " ".repeat(padding - escaped_filename.len())
+                " ".repeat(padding - escaped_filename.len() + 1)
             } else {
-                String::new()
+                " ".to_string()
             };
-            format!("{escaped_filename}{pad_spaces}{} {formatted_content}", config.separator)
+            format!("{escaped_filename}{}{pad_spaces}{formatted_content}", config.separator)
         }
     }
 }
