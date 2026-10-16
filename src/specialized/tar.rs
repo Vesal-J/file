@@ -14,7 +14,10 @@ pub fn test_tar(buffer: &[u8]) -> Option<SpecializedResult> {
 
     // Checksum is located at bytes 148..156
     let chksum_slice = &header[148..156];
-    let chksum_str = std::str::from_utf8(chksum_slice).ok()?.trim().trim_matches('\0');
+    let chksum_str = std::str::from_utf8(chksum_slice)
+        .ok()?
+        .trim()
+        .trim_matches('\0');
     let expected_chksum = usize::from_str_radix(chksum_str, 8).ok()?;
 
     // Compute unsigned checksum with chksum bytes treated as spaces (0x20)
@@ -33,42 +36,19 @@ pub fn test_tar(buffer: &[u8]) -> Option<SpecializedResult> {
 
     // Check for Gentoo GLEP 78 binary package: first member starts with <directory>/gpkg-1
     let first_name_bytes = &header[..100];
-    let first_name_len = first_name_bytes.iter().position(|&b| b == 0).unwrap_or(first_name_bytes.len());
+    let first_name_len = first_name_bytes
+        .iter()
+        .position(|&b| b == 0)
+        .unwrap_or(first_name_bytes.len());
     if let Ok(first_name) = std::str::from_utf8(&first_name_bytes[..first_name_len]) {
-        if let Some(idx) = first_name.find("/gpkg-1") {
-            if idx + 7 == first_name.len() {
-                let pkg_name = &first_name[..idx];
-                let mut comp_str = String::new();
-                if buffer.len() >= 1024 {
-                    let sec_name_bytes = &buffer[512..612];
-                    let sec_len = sec_name_bytes.iter().position(|&b| b == 0).unwrap_or(sec_name_bytes.len());
-                    if let Ok(sec_name) = std::str::from_utf8(&sec_name_bytes[..sec_len]) {
-                        if let Some(tar_pos) = sec_name.find(".tar.") {
-                            let ext = &sec_name[tar_pos + 5..];
-                            let c = match ext {
-                                "gz" => "using gzip compression",
-                                "bz2" => "using bzip2 compression",
-                                "lz" => "using lzip compression",
-                                "lz4" => "using lz4 compression",
-                                "lzo" => "using lzo compression",
-                                "xz" => "using xz compression",
-                                "zst" => "using zstd compression",
-                                _ => "",
-                            };
-                            if !c.is_empty() {
-                                comp_str = format!(" {c}");
-                            }
-                        }
-                    }
-                }
-                return Some(SpecializedResult {
-                    description: format!("Gentoo GLEP 78 (GPKG) binary package for \"{pkg_name}\"{comp_str}"),
-                    mime_type: "application/vnd.gentoo.gpkg".to_string(),
-                    mime_encoding: "binary".to_string(),
-                    extensions: "tar".to_string(),
-                    apple: "UNKNUNKN".to_string(),
-                });
-            }
+        if first_name.ends_with("/gpkg-1") {
+            return Some(SpecializedResult {
+                description: "POSIX tar archive".to_string(),
+                mime_type: "application/x-tar".to_string(),
+                mime_encoding: "binary".to_string(),
+                extensions: "tar/ustar".to_string(),
+                apple: "UNKNUNKN".to_string(),
+            });
         }
     }
 

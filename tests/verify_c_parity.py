@@ -81,15 +81,18 @@ def main():
         print(f"\n[Category: {cat_name}] ({len(files)} files)")
 
         for mode_name, flags in MODES:
-            c_code, c_out = run_cmd(C_BIN, flags, files)
-            r_code, r_out = run_cmd(RUST_BIN, flags, files)
+            # Some files (notably universal Mach-O binaries) produce multiple
+            # output lines per operand. Run one operand at a time so these
+            # lines stay associated with the file being compared.
+            c_results = [run_cmd(C_BIN, flags, [f]) for f in files]
+            r_results = [run_cmd(RUST_BIN, flags, [f]) for f in files]
 
             exact_matches = 0
             mismatches = []
 
-            for i in range(min(len(c_out), len(r_out))):
-                c_line = c_out[i].strip()
-                r_line = r_out[i].strip()
+            for i, ((_, c_out), (_, r_out)) in enumerate(zip(c_results, r_results)):
+                c_line = "\n".join(line.strip() for line in c_out)
+                r_line = "\n".join(line.strip() for line in r_out)
 
                 if c_line == r_line:
                     exact_matches += 1
@@ -106,7 +109,7 @@ def main():
 
             # Show first 2 mismatches if any
             if mismatches and len(mismatches) < total:
-                for f, c_l, r_l in mismatches[:2]:
+                for f, c_l, r_l in mismatches:
                     f_name = os.path.basename(f)
                     print(f"      [diff in {f_name}]")
                     print(f"        C:    \"{c_l}\"")

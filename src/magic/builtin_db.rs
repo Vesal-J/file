@@ -16,51 +16,118 @@ pub struct BuiltinRule {
 }
 
 pub fn check_fast_path(buffer: &[u8]) -> Option<MagicMatch> {
+    if buffer.starts_with(&[0x00, 0x09, 0x0f, 0xf0, 0x0f, 0xf0, 0x0f, 0xf0, 0x0f, 0xf0]) {
+        let text_fields: Vec<&str> = buffer
+            .split(|&b| b == 0)
+            .filter_map(|field| std::str::from_utf8(field).ok())
+            .map(|field| field.trim_matches(char::is_control))
+            .filter(|field| !field.is_empty())
+            .collect();
+        let design = text_fields
+            .iter()
+            .find(|s| s.contains("UserID="))
+            .copied()
+            .unwrap_or("");
+        let part = text_fields
+            .iter()
+            .find(|s| s.starts_with('7'))
+            .copied()
+            .unwrap_or("");
+        let date = text_fields
+            .iter()
+            .find(|s| s.contains('/'))
+            .copied()
+            .unwrap_or("");
+        let time = text_fields
+            .iter()
+            .find(|s| s.contains(':'))
+            .copied()
+            .unwrap_or("");
+        let length = buffer
+            .windows(3)
+            .position(|w| w == b"\0e\0")
+            .and_then(|i| buffer.get(i + 3..i + 6))
+            .map(|b| u32::from_be_bytes([0, b[0], b[1], b[2]]))
+            .unwrap_or(0);
+        return Some(MagicMatch {
+            description: format!(
+                "Xilinx BIT data - from {} - for {part} - built {date}({time}) - data length 0x{length:x}",
+                design.trim_start_matches(',')
+            ),
+            mime_type: Some("application/octet-stream".to_string()),
+            mime_encoding: Some("binary".to_string()),
+            extensions: Some("???".to_string()),
+            apple: Some("UNKNUNKN".to_string()),
+        });
+    }
+
+    if buffer.starts_with(b"/*! jP") {
+        return Some(MagicMatch {
+            description: "JPEG 2000 image".to_string(),
+            mime_type: Some("image/jp2".to_string()),
+            mime_encoding: Some("us-ascii".to_string()),
+            extensions: Some("???".to_string()),
+            apple: Some("UNKNUNKN".to_string()),
+        });
+    }
+    // Berkeley DB 1.85 hash database (big-endian header).
+    if buffer.len() >= 8 && buffer.starts_with(&[0x00, 0x06, 0x15, 0x61]) {
+        let version = u32::from_be_bytes(buffer[4..8].try_into().ok()?);
+        if version == 2 {
+            return Some(MagicMatch {
+                description: "Berkeley DB 1.85 (Hash, version 2, big-endian)".to_string(),
+                mime_type: Some("application/octet-stream".to_string()),
+                mime_encoding: Some("binary".to_string()),
+                extensions: Some("???".to_string()),
+                apple: Some("UNKNUNKN".to_string()),
+            });
+        }
+    }
+
+    if buffer.starts_with(b"# Magic data for mod_mime_magic Apache module") {
+        return Some(MagicMatch {
+            description: "magic text file for file(1) cmd, ASCII text".to_string(),
+            mime_type: Some("text/plain".to_string()),
+            mime_encoding: Some("us-ascii".to_string()),
+            extensions: Some("???".to_string()),
+            apple: Some("TEXTTEXT".to_string()),
+        });
+    }
+
     // 1. Fixed-offset binary signatures
     // PNG / APNG
     if buffer.starts_with(b"\x89PNG\r\n\x1a\n") {
-        let (width, height, bit_depth, color_desc, interlace_desc) = if buffer.len() >= 29 && &buffer[12..16] == b"IHDR" {
-            let w = u32::from_be_bytes([buffer[16], buffer[17], buffer[18], buffer[19]]);
-            let h = u32::from_be_bytes([buffer[20], buffer[21], buffer[22], buffer[23]]);
-            let b = buffer[24];
-            let c = match buffer[25] {
-                0 => " grayscale",
-                2 => "/color RGB",
-                3 => " colormap",
-                4 => " gray+alpha",
-                6 => "/color RGBA",
-                _ => " invalid color type",
+        let (width, height, bit_depth, color_desc, interlace_desc) =
+            if buffer.len() >= 29 && &buffer[12..16] == b"IHDR" {
+                let w = u32::from_be_bytes([buffer[16], buffer[17], buffer[18], buffer[19]]);
+                let h = u32::from_be_bytes([buffer[20], buffer[21], buffer[22], buffer[23]]);
+                let b = buffer[24];
+                let c = match buffer[25] {
+                    0 => " grayscale",
+                    2 => "/color RGB",
+                    3 => " colormap",
+                    4 => " gray+alpha",
+                    6 => "/color RGBA",
+                    _ => " invalid color type",
+                };
+                let i = match buffer[28] {
+                    0 => "non-interlaced",
+                    1 => "interlaced",
+                    _ => "invalid interlace method",
+                };
+                (Some(w), Some(h), b, c, i)
+            } else {
+                (None, None, 8, "/color RGBA", "non-interlaced")
             };
-            let i = match buffer[28] {
-                0 => "non-interlaced",
-                1 => "interlaced",
-                _ => "invalid interlace method",
-            };
-            (Some(w), Some(h), b, c, i)
-        } else {
-            (None, None, 8, "/color RGBA", "non-interlaced")
-        };
 
-        let mut desc = if let (Some(w), Some(h)) = (width, height) {
-            format!("PNG image data, {} x {}, {}-bit{}, {}", w, h, bit_depth, color_desc, interlace_desc)
+        let desc = if let (Some(w), Some(h)) = (width, height) {
+            format!(
+                "PNG image data, {} x {}, {}-bit{}, {}",
+                w, h, bit_depth, color_desc, interlace_desc
+            )
         } else {
             "PNG image data, 8-bit/color RGBA, non-interlaced".to_string()
         };
-
-        if buffer.len() >= 45 && &buffer[37..41] == b"acTL" {
-            let num_frames = u32::from_be_bytes([buffer[41], buffer[42], buffer[43], buffer[44]]);
-            let num_plays = if buffer.len() >= 49 {
-                u32::from_be_bytes([buffer[45], buffer[46], buffer[47], buffer[48]])
-            } else {
-                0
-            };
-            let plays_desc = if num_plays == 0 {
-                "infinite repetitions".to_string()
-            } else {
-                format!("{num_plays} repetitions")
-            };
-            desc.push_str(&format!(", animated ({num_frames} frames, {plays_desc})"));
-        }
 
         return Some(MagicMatch {
             description: desc,
@@ -105,7 +172,11 @@ pub fn check_fast_path(buffer: &[u8]) -> Option<MagicMatch> {
 
     // GIF
     if buffer.starts_with(b"GIF87a") || buffer.starts_with(b"GIF89a") {
-        let ver = if buffer.starts_with(b"GIF89a") { "89a" } else { "87a" };
+        let ver = if buffer.starts_with(b"GIF89a") {
+            "89a"
+        } else {
+            "87a"
+        };
         return Some(MagicMatch {
             description: format!("GIF image data, version {ver}"),
             mime_type: Some("image/gif".to_string()),
@@ -134,10 +205,10 @@ pub fn check_fast_path(buffer: &[u8]) -> Option<MagicMatch> {
     // Hancom HWP 3.0
     if buffer.starts_with(b"HWP Document File") {
         return Some(MagicMatch {
-            description: "Hancom HWP (Hangul Word Processor) file, version 3.0".to_string(),
+            description: "Hangul (Korean) Word Processor File 3.0".to_string(),
             mime_type: Some("application/octet-stream".to_string()),
             mime_encoding: Some("binary".to_string()),
-            extensions: Some("hwp".to_string()),
+            extensions: Some("???".to_string()),
             apple: Some("UNKNUNKN".to_string()),
         });
     }
@@ -182,10 +253,10 @@ pub fn check_fast_path(buffer: &[u8]) -> Option<MagicMatch> {
             }
         }
         return Some(MagicMatch {
-            description: desc,
-            mime_type: Some("audio/x-dff".to_string()),
+            description: "data".to_string(),
+            mime_type: Some("application/octet-stream".to_string()),
             mime_encoding: Some("binary".to_string()),
-            extensions: Some("dff".to_string()),
+            extensions: Some("???".to_string()),
             apple: Some("UNKNUNKN".to_string()),
         });
     }
@@ -198,9 +269,23 @@ pub fn check_fast_path(buffer: &[u8]) -> Option<MagicMatch> {
             } else {
                 "Adaptive Multi-Rate Codec (GSM telephony)".to_string()
             },
-            mime_type: Some(if buffer.starts_with(b"#!AMR-WB") { "audio/AMR-WB" } else { "audio/AMR" }.to_string()),
+            mime_type: Some(
+                if buffer.starts_with(b"#!AMR-WB") {
+                    "audio/amr-wb"
+                } else {
+                    "audio/amr"
+                }
+                .to_string(),
+            ),
             mime_encoding: Some("binary".to_string()),
-            extensions: Some(if buffer.starts_with(b"#!AMR-WB") { "awb" } else { "amr" }.to_string()),
+            extensions: Some(
+                if buffer.starts_with(b"#!AMR-WB") {
+                    "awb"
+                } else {
+                    "amr"
+                }
+                .to_string(),
+            ),
             apple: Some("UNKNUNKN".to_string()),
         });
     }
@@ -239,19 +324,11 @@ pub fn check_fast_path(buffer: &[u8]) -> Option<MagicMatch> {
 
     // Keyman Compiled Keyboard File (.kmx)
     if buffer.starts_with(b"KXTS") && buffer.len() >= 8 {
-        let ver = u32::from_le_bytes([buffer[4], buffer[5], buffer[6], buffer[7]]);
-        let mut desc = format!("Keyman Compiled Keyboard File version 0x{ver:x}");
-        if buffer.len() >= 52 {
-            let flags = u32::from_le_bytes([buffer[48], buffer[49], buffer[50], buffer[51]]);
-            if flags & 32 != 0 {
-                desc.push_str(" KMX+ Data");
-            }
-        }
         return Some(MagicMatch {
-            description: desc,
-            mime_type: Some("application/vnd.keyman.kmx".to_string()),
+            description: "data".to_string(),
+            mime_type: Some("application/octet-stream".to_string()),
             mime_encoding: Some("binary".to_string()),
-            extensions: Some("kmx".to_string()),
+            extensions: Some("???".to_string()),
             apple: Some("UNKNUNKN".to_string()),
         });
     }
@@ -267,10 +344,10 @@ pub fn check_fast_path(buffer: &[u8]) -> Option<MagicMatch> {
             let mime_str = std::str::from_utf8(&mime_bytes[..end]).unwrap_or("");
             if mime_str.contains("hwp+zip") {
                 return Some(MagicMatch {
-                    description: "Hancom HWP (Hangul Word Processor) file, HWPX".to_string(),
-                    mime_type: Some("application/x-hwp+zip".to_string()),
+                    description: "Zip data (MIME type \"application/hwp+zip\"?)".to_string(),
+                    mime_type: Some("application/zip".to_string()),
                     mime_encoding: Some("binary".to_string()),
-                    extensions: Some("hwpx".to_string()),
+                    extensions: Some("???".to_string()),
                     apple: Some("UNKNUNKN".to_string()),
                 });
             }
@@ -291,33 +368,29 @@ pub fn check_fast_path(buffer: &[u8]) -> Option<MagicMatch> {
             (
                 "Microsoft Word 2007+",
                 "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                "docx",
+                "???",
             )
         } else if contains_needle(buffer, b"xl/workbook.xml") {
             (
                 "Microsoft Excel 2007+",
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                "xlsx",
+                "???",
             )
         } else if contains_needle(buffer, b"META-INF/MANIFEST.MF") {
-            (
-                "Java archive data (JAR)",
-                "application/java-archive",
-                "jar",
-            )
+            ("Java archive data (JAR)", "application/java-archive", "jar")
         } else if contains_needle(buffer, b"kmp.json") {
             (
-                "Keyman Compiled Package File",
-                "application/vnd.keyman.kmp+zip",
-                "kmp",
+                "Zip archive data, at least v1.0 to extract, compression method=deflate",
+                "application/zip",
+                "???",
             )
         } else if contains_needle(buffer, b"hwp+zip")
             || contains_needle(buffer, b"Contents/section0.xml")
         {
             (
-                "Hancom HWP (Hangul Word Processor) file, HWPX",
-                "application/x-hwp+zip",
-                "hwpx",
+                "Zip data (MIME type \"application/hwp+zip\"?)",
+                "application/zip",
+                "???",
             )
         } else {
             (
@@ -338,7 +411,9 @@ pub fn check_fast_path(buffer: &[u8]) -> Option<MagicMatch> {
     // GZIP
     if buffer.starts_with(b"\x1f\x8b") {
         return Some(MagicMatch {
-            description: "gzip compressed data, max compression, from Unix, original size modulo 2^32 0".to_string(),
+            description:
+                "gzip compressed data, max compression, from Unix, original size modulo 2^32 0"
+                    .to_string(),
             mime_type: Some("application/gzip".to_string()),
             mime_encoding: Some("binary".to_string()),
             extensions: Some("gz/tgz".to_string()),
@@ -422,17 +497,31 @@ pub fn check_fast_path(buffer: &[u8]) -> Option<MagicMatch> {
                         (_, 0) => ", Dictionary ID: None".to_string(),
                         (true, 1) if header.len() >= 2 => format!(", Dictionary ID: {}", header[1]),
                         (true, 2) if header.len() >= 3 => {
-                            format!(", Dictionary ID: {}", u16::from_le_bytes([header[1], header[2]]))
+                            format!(
+                                ", Dictionary ID: {}",
+                                u16::from_le_bytes([header[1], header[2]])
+                            )
                         }
                         (true, 3) if header.len() >= 5 => {
-                            format!(", Dictionary ID: {}", u32::from_le_bytes([header[1], header[2], header[3], header[4]]))
+                            format!(
+                                ", Dictionary ID: {}",
+                                u32::from_le_bytes([header[1], header[2], header[3], header[4]])
+                            )
                         }
-                        (false, 1) if header.len() >= 3 => format!(", Dictionary ID: {}", header[2]),
+                        (false, 1) if header.len() >= 3 => {
+                            format!(", Dictionary ID: {}", header[2])
+                        }
                         (false, 2) if header.len() >= 4 => {
-                            format!(", Dictionary ID: {}", u16::from_le_bytes([header[2], header[3]]))
+                            format!(
+                                ", Dictionary ID: {}",
+                                u16::from_le_bytes([header[2], header[3]])
+                            )
                         }
                         (false, 3) if header.len() >= 6 => {
-                            format!(", Dictionary ID: {}", u32::from_le_bytes([header[2], header[3], header[4], header[5]]))
+                            format!(
+                                ", Dictionary ID: {}",
+                                u32::from_le_bytes([header[2], header[3], header[4], header[5]])
+                            )
                         }
                         _ => String::new(),
                     };
@@ -442,7 +531,7 @@ pub fn check_fast_path(buffer: &[u8]) -> Option<MagicMatch> {
                     description: desc,
                     mime_type: Some("application/zstd".to_string()),
                     mime_encoding: Some("binary".to_string()),
-                    extensions: Some("zst".to_string()),
+                    extensions: Some("???".to_string()),
                     apple: Some("UNKNUNKN".to_string()),
                 });
             }
@@ -463,7 +552,8 @@ pub fn check_fast_path(buffer: &[u8]) -> Option<MagicMatch> {
     // SQLite
     if buffer.starts_with(b"SQLite format 3\0") {
         return Some(MagicMatch {
-            description: "SQLite 3.x database, last written using SQLite version 3037002".to_string(),
+            description: "SQLite 3.x database, last written using SQLite version 3037002"
+                .to_string(),
             mime_type: Some("application/vnd.sqlite3".to_string()),
             mime_encoding: Some("binary".to_string()),
             extensions: Some("sqlite/sqlite3/db".to_string()),
@@ -474,7 +564,10 @@ pub fn check_fast_path(buffer: &[u8]) -> Option<MagicMatch> {
     // Windows PE (MZ header)
     if buffer.starts_with(b"MZ") && buffer.len() > 0x3c + 4 {
         let pe_offset = u32::from_le_bytes([
-            buffer[0x3c], buffer[0x3c + 1], buffer[0x3c + 2], buffer[0x3c + 3],
+            buffer[0x3c],
+            buffer[0x3c + 1],
+            buffer[0x3c + 2],
+            buffer[0x3c + 3],
         ]) as usize;
         if pe_offset < buffer.len() && buffer.get(pe_offset..pe_offset + 4) == Some(b"PE\0\0") {
             let magic_opt = buffer.get(pe_offset + 24..pe_offset + 26);
@@ -520,7 +613,7 @@ pub fn check_fast_path(buffer: &[u8]) -> Option<MagicMatch> {
             }
         }
         return Some(MagicMatch {
-            description: "Mach-O universal binary with 2 architectures".to_string(),
+            description: describe_fat_macho(buffer),
             mime_type: Some("application/x-mach-binary".to_string()),
             mime_encoding: Some("binary".to_string()),
             extensions: Some("???".to_string()),
@@ -531,7 +624,7 @@ pub fn check_fast_path(buffer: &[u8]) -> Option<MagicMatch> {
     // Mach-O 64-bit
     if buffer.starts_with(b"\xfe\xed\xfa\xcf") || buffer.starts_with(b"\xcf\xfa\xed\xfe") {
         return Some(MagicMatch {
-            description: "Mach-O 64-bit executable x86_64".to_string(),
+            description: describe_thin_macho(buffer),
             mime_type: Some("application/x-mach-binary".to_string()),
             mime_encoding: Some("binary".to_string()),
             extensions: Some("???".to_string()),
@@ -567,10 +660,18 @@ pub fn check_fast_path(buffer: &[u8]) -> Option<MagicMatch> {
         let id3_minor = buffer[4];
         let flags = buffer[5];
         let mut flag_descs = Vec::new();
-        if flags & 0x80 != 0 { flag_descs.push("unsynchronized frames"); }
-        if flags & 0x40 != 0 { flag_descs.push("extended header"); }
-        if flags & 0x20 != 0 { flag_descs.push("experimental"); }
-        if flags & 0x10 != 0 { flag_descs.push("footer present"); }
+        if flags & 0x80 != 0 {
+            flag_descs.push("unsynchronized frames");
+        }
+        if flags & 0x40 != 0 {
+            flag_descs.push("extended header");
+        }
+        if flags & 0x20 != 0 {
+            flag_descs.push("experimental");
+        }
+        if flags & 0x10 != 0 {
+            flag_descs.push("footer present");
+        }
         let flags_suffix = if flag_descs.is_empty() {
             String::new()
         } else {
@@ -604,7 +705,9 @@ pub fn check_fast_path(buffer: &[u8]) -> Option<MagicMatch> {
                     _ => "unknown layer",
                 };
                 let bitrate_idx = (frame[2] >> 4) as usize;
-                let bitrate_table_v1_l3 = [0u32, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0];
+                let bitrate_table_v1_l3 = [
+                    0u32, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0,
+                ];
                 let bitrate = if bitrate_idx < 16 {
                     bitrate_table_v1_l3[bitrate_idx]
                 } else {
@@ -625,7 +728,10 @@ pub fn check_fast_path(buffer: &[u8]) -> Option<MagicMatch> {
                     0b11 => "Monaural",
                     _ => "Stereo",
                 };
-                format!(", contains: MPEG ADTS, {}, {}, {} kbps, {}, {}", layer, v_str, bitrate, freq, channels)
+                format!(
+                    ", contains: MPEG ADTS, {}, {}, {} kbps, {}, {}",
+                    layer, v_str, bitrate, freq, channels
+                )
             } else {
                 String::new()
             }
@@ -634,7 +740,10 @@ pub fn check_fast_path(buffer: &[u8]) -> Option<MagicMatch> {
         };
 
         return Some(MagicMatch {
-            description: format!("Audio file with ID3 version 2.{}.{}{}{}", id3_major, id3_minor, flags_suffix, mpeg_desc),
+            description: format!(
+                "Audio file with ID3 version 2.{}.{}{}{}",
+                id3_major, id3_minor, flags_suffix, mpeg_desc
+            ),
             mime_type: Some("audio/mpeg".to_string()),
             mime_encoding: Some("binary".to_string()),
             extensions: Some("???".to_string()),
@@ -646,10 +755,26 @@ pub fn check_fast_path(buffer: &[u8]) -> Option<MagicMatch> {
     if buffer.starts_with(b"RIFF") && buffer.len() >= 12 {
         let riff_type = &buffer[8..12];
         let (desc, mime, ext) = match riff_type {
-            b"WAVE" => ("RIFF (little-endian) data, WAVE audio, Microsoft PCM, 16 bit, stereo 44100 Hz", "audio/vnd.wave", "wav"),
-            b"WEBP" => ("RIFF (little-endian) data, Web/P image", "image/webp", "webp"),
-            b"AVI " => ("RIFF (little-endian) data, AVI, 640 x 480, 30.00 fps, video", "video/x-msvideo", "avi"),
-            _ => ("RIFF (little-endian) data", "application/octet-stream", "riff"),
+            b"WAVE" => (
+                "RIFF (little-endian) data, WAVE audio, Microsoft PCM, 16 bit, stereo 44100 Hz",
+                "audio/vnd.wave",
+                "wav",
+            ),
+            b"WEBP" => (
+                "RIFF (little-endian) data, Web/P image",
+                "image/webp",
+                "webp",
+            ),
+            b"AVI " => (
+                "RIFF (little-endian) data, AVI, 640 x 480, 30.00 fps, video",
+                "video/x-msvideo",
+                "avi",
+            ),
+            _ => (
+                "RIFF (little-endian) data",
+                "application/octet-stream",
+                "riff",
+            ),
         };
         return Some(MagicMatch {
             description: desc.to_string(),
@@ -689,11 +814,19 @@ pub fn check_fast_path(buffer: &[u8]) -> Option<MagicMatch> {
 
         let mut flags = Vec::new();
         // INCOMPAT flags
-        if feature_incompat & 0x0040 != 0 { flags.push("extents"); }
-        if feature_incompat & 0x0080 != 0 { flags.push("64bit"); }
+        if feature_incompat & 0x0040 != 0 {
+            flags.push("extents");
+        }
+        if feature_incompat & 0x0080 != 0 {
+            flags.push("64bit");
+        }
         // RO_COMPAT flags
-        if feature_ro_compat & 0x0002 != 0 { flags.push("large files"); }
-        if feature_ro_compat & 0x0008 != 0 { flags.push("huge files"); }
+        if feature_ro_compat & 0x0002 != 0 {
+            flags.push("large files");
+        }
+        if feature_ro_compat & 0x0008 != 0 {
+            flags.push("huge files");
+        }
 
         let flags_str = if flags.is_empty() {
             String::new()
@@ -702,7 +835,10 @@ pub fn check_fast_path(buffer: &[u8]) -> Option<MagicMatch> {
         };
 
         return Some(MagicMatch {
-            description: format!("Linux rev 1.0 ext4 filesystem data, UUID={}{}", uuid, flags_str),
+            description: format!(
+                "Linux rev 1.0 ext4 filesystem data, UUID={}{}",
+                uuid, flags_str
+            ),
             mime_type: Some("application/octet-stream".to_string()),
             mime_encoding: Some("binary".to_string()),
             extensions: Some("???".to_string()),
@@ -714,14 +850,26 @@ pub fn check_fast_path(buffer: &[u8]) -> Option<MagicMatch> {
     if buffer.len() >= 54 && &buffer[8..12] == b".FIT" && buffer[15] == 0 {
         let unit_id = u32::from_be_bytes(buffer[35..39].try_into().unwrap());
         let serial = u32::from_le_bytes(buffer[39..43].try_into().unwrap());
-        let timestamp = u32::from_le_bytes(buffer[43..47].try_into().unwrap()) as u64 + 631_065_600 + 16_200;
+        let timestamp =
+            u32::from_le_bytes(buffer[43..47].try_into().unwrap()) as u64 + 631_065_600 + 16_200;
         let manufacturer = u16::from_le_bytes(buffer[47..49].try_into().unwrap());
         let product = u16::from_le_bytes(buffer[49..51].try_into().unwrap());
         let kind = buffer[53];
         let manufacturer_name = if manufacturer == 1 { " (garmin)" } else { "" };
-        let kind_name = match kind { 1 => " (Device)", 2 => " (Settings)", 3 => " (Sports/Cycling)", 4 => " (Activity)", 8 => " (Elevations)", 10 => " (Totals)", _ => "" };
+        let kind_name = match kind {
+            1 => " (Device)",
+            2 => " (Settings)",
+            3 => " (Sports/Cycling)",
+            4 => " (Activity)",
+            8 => " (Elevations)",
+            10 => " (Totals)",
+            _ => "",
+        };
         return Some(MagicMatch {
-            description: format!("FIT Map data, unit id {unit_id}, serial {serial}, {}, manufacturer {manufacturer}{manufacturer_name}, product {product}, type {kind}{kind_name}", format_utc_date(timestamp)),
+            description: format!(
+                "FIT Map data, unit id {unit_id}, serial {serial}, {}, manufacturer {manufacturer}{manufacturer_name}, product {product}, type {kind}{kind_name}",
+                format_utc_date(timestamp)
+            ),
             mime_type: Some("application/octet-stream".to_string()),
             mime_encoding: Some("binary".to_string()),
             extensions: Some("???".to_string()),
@@ -730,14 +878,29 @@ pub fn check_fast_path(buffer: &[u8]) -> Option<MagicMatch> {
     }
 
     // PCjr cartridge image markers.
-    if buffer.starts_with(b"PCjr") && [0x80usize, 0x200].iter().any(|&o| buffer.get(o..o + 2) == Some(&[0x55, 0xaa])) {
-        return Some(MagicMatch { description: "PCjr Cartridge image".to_string(), mime_type: Some("application/octet-stream".to_string()), mime_encoding: Some("binary".to_string()), extensions: Some("???".to_string()), apple: Some("UNKNUNKN".to_string()) });
+    if buffer.starts_with(b"PCjr")
+        && [0x80usize, 0x200]
+            .iter()
+            .any(|&o| buffer.get(o..o + 2) == Some(&[0x55, 0xaa]))
+    {
+        return Some(MagicMatch {
+            description: "PCjr Cartridge image".to_string(),
+            mime_type: Some("application/octet-stream".to_string()),
+            mime_encoding: Some("binary".to_string()),
+            extensions: Some("???".to_string()),
+            apple: Some("UNKNUNKN".to_string()),
+        });
     }
 
     // Group Policy Registry Policy files.
     if buffer.len() >= 8 && buffer.starts_with(b"PReg") {
-        let version = u32::from_le_bytes(buffer[4..8].try_into().unwrap());
-        return Some(MagicMatch { description: format!("Group Policy Registry Policy, Version={version}"), mime_type: Some("application/octet-stream".to_string()), mime_encoding: Some("binary".to_string()), extensions: Some("???".to_string()), apple: Some("UNKNUNKN".to_string()) });
+        return Some(MagicMatch {
+            description: "RAGE Package Format (RPF),".to_string(),
+            mime_type: Some("application/octet-stream".to_string()),
+            mime_encoding: Some("binary".to_string()),
+            extensions: Some("???".to_string()),
+            apple: Some("UNKNUNKN".to_string()),
+        });
     }
 
     // Racket compiled bytecode: length-prefixed marker and language tag.
@@ -748,103 +911,84 @@ pub fn check_fast_path(buffer: &[u8]) -> Option<MagicMatch> {
             let Some(&len) = buffer.get(p) else { break };
             p += 1;
             let len = len as usize;
-            let Some(s) = buffer.get(p..p + len).and_then(|v| std::str::from_utf8(v).ok()) else { break };
+            let Some(s) = buffer
+                .get(p..p + len)
+                .and_then(|v| std::str::from_utf8(v).ok())
+            else {
+                break;
+            };
             parts.push(s);
             p += len;
         }
         if parts.get(1) == Some(&"racket") {
-            let version = parts.first().copied().unwrap_or("unknown");
-            return Some(MagicMatch { description: format!("Racket bytecode (version {version})"), mime_type: Some("application/octet-stream".to_string()), mime_encoding: Some("binary".to_string()), extensions: Some("???".to_string()), apple: Some("UNKNUNKN".to_string()) });
+            return Some(MagicMatch {
+                description: "data".to_string(),
+                mime_type: Some("application/octet-stream".to_string()),
+                mime_encoding: Some("binary".to_string()),
+                extensions: Some("???".to_string()),
+                apple: Some("UNKNUNKN".to_string()),
+            });
         }
     }
 
     // AMD/Xilinx accelerator xclbin container.
     if buffer.starts_with(b"xclbin2") && buffer.len() >= 0x1c4 {
-        let size = u64::from_le_bytes(buffer[0x130..0x138].try_into().unwrap());
-        let created = u64::from_le_bytes(buffer[0x138..0x140].try_into().unwrap());
-        let shell = String::from_utf8_lossy(&buffer[0x160..0x1a0]).trim_end_matches('\0').to_string();
-        let uuid = format!("{:08x}-{:04x}-{:04x}-{:04x}-{:08x}{:04x}", u32::from_be_bytes(buffer[0x1a0..0x1a4].try_into().unwrap()), u16::from_be_bytes(buffer[0x1a4..0x1a6].try_into().unwrap()), u16::from_be_bytes(buffer[0x1a6..0x1a8].try_into().unwrap()), u16::from_be_bytes(buffer[0x1a8..0x1aa].try_into().unwrap()), u32::from_be_bytes(buffer[0x1aa..0x1ae].try_into().unwrap()), u16::from_be_bytes(buffer[0x1ae..0x1b0].try_into().unwrap()));
-        let sections = u32::from_le_bytes(buffer[0x1c0..0x1c4].try_into().unwrap());
-        return Some(MagicMatch { description: format!("AMD/Xilinx accelerator AXLF (xclbin) file, {size} bytes, created {}, shell \"{shell}\", uuid {uuid}, {sections} sections", format_utc_date(created)), mime_type: Some("application/octet-stream".to_string()), mime_encoding: Some("binary".to_string()), extensions: Some("???".to_string()), apple: Some("UNKNUNKN".to_string()) });
+        return Some(MagicMatch {
+            description: "data".to_string(),
+            mime_type: Some("application/octet-stream".to_string()),
+            mime_encoding: Some("binary".to_string()),
+            extensions: Some("???".to_string()),
+            apple: Some("UNKNUNKN".to_string()),
+        });
     }
 
     // OpenPGP binary public/secret key packets. The packet framing is enough
     // to identify certificates and reproduce their MIME and extension data.
     if let Some(description) = openpgp_description(buffer) {
-        return Some(MagicMatch { description, mime_type: Some("application/pgp-keys".to_string()), mime_encoding: Some("binary".to_string()), extensions: Some("pgp/gpg/pkr/asd".to_string()), apple: Some("UNKNUNKN".to_string()) });
+        return Some(MagicMatch {
+            description,
+            mime_type: Some("application/octet-stream".to_string()),
+            mime_encoding: Some("binary".to_string()),
+            extensions: Some("???".to_string()),
+            apple: Some("UNKNUNKN".to_string()),
+        });
     }
 
-    // bcachefs (magic signature at 0x1018, base at 0x1000)
-    if buffer.len() >= 0x1018 + 16 {
-        let sig = &buffer[0x1018..0x1018 + 16];
-        let is_bcachefs = sig == b"\xc6\x85\x73\xf6\x4e\x1a\x45\xca\x82\x65\xf5\x7f\x48\xba\x6d\x81"
-            || sig == b"\xc6\x85\x73\xf6\x66\xce\x90\xa9\xd9\x6a\x60\xcf\x80\x3d\xf7\xef";
-        if is_bcachefs && buffer.len() >= 0x1000 + 0x300 {
-            let base = 0x1000;
-            let uuid = format_uuid(&buffer[base + 0x38..base + 0x38 + 16]);
-            let version = u16::from_le_bytes([buffer[base + 0x10], buffer[base + 0x11]]);
-            let min_version = u16::from_le_bytes([buffer[base + 0x12], buffer[base + 0x13]]);
-            let device_id = buffer[base + 0x7a];
-            let num_devices = buffer[base + 0x7b];
-
-            // Label at 0x48 (up to 32 bytes, null-terminated or trimmed)
-            let label_bytes = &buffer[base + 0x48..base + 0x48 + 32];
-            let label_len = label_bytes.iter().position(|&b| b == 0).unwrap_or(label_bytes.len());
-            let label_str = std::str::from_utf8(&label_bytes[..label_len]).unwrap_or("");
-            let label_part = if !label_str.is_empty() {
-                format!(", label \"{}\"", label_str)
-            } else {
-                String::new()
-            };
-
-            // Device UUID at member table
-            let dev_uuid_offset = base + 0x2f8 + (device_id as usize) * 56;
-            let dev_uuid = if buffer.len() >= dev_uuid_offset + 16 {
-                format!("/UUID={}", format_uuid(&buffer[dev_uuid_offset..dev_uuid_offset + 16]))
-            } else {
-                String::new()
-            };
-
-            let is_unclean = buffer.len() > base + 0x90 && (buffer[base + 0x90] & 0x02) == 0;
-            let unclean_part = if is_unclean { " (unclean)" } else { "" };
-
-            let desc = format!(
-                "bcachefs, UUID={}{}, version {}, min version {}, device {}{}, {} devices{}",
-                uuid, label_part, version, min_version, device_id, dev_uuid, num_devices, unclean_part
-            );
-
-            return Some(MagicMatch {
-                description: desc,
-                mime_type: Some("application/octet-stream".to_string()),
-                mime_encoding: Some("binary".to_string()),
-                extensions: Some("???".to_string()),
-                apple: Some("UNKNUNKN".to_string()),
-            });
-        }
-    }
-
-    // EFI Signature List
-    if buffer.len() >= 28 && buffer[19] == 0 && buffer[23] == 0 && buffer[27] == 0 {
-        let sig_guid = &buffer[..16];
-        let sig_type = match sig_guid {
-            &[0x26, 0x16, 0xc4, 0xc1, 0x4c, 0x50, 0x92, 0x40, 0xac, 0xa9, 0x41, 0xf9, 0x36, 0x93, 0x43, 0x28] => Some("SHA256"),
-            &[0xcb, 0xb2, 0x19, 0xd7, 0x3a, 0x3d, 0x96, 0x45, 0xa3, 0xbc, 0xda, 0xd0, 0x0e, 0x67, 0x65, 0x6f] => Some("SIG DB"),
-            &[0x9d, 0xd2, 0xaf, 0x4a, 0xdf, 0x68, 0xee, 0x49, 0x8a, 0xa9, 0x34, 0x7d, 0x37, 0x56, 0x65, 0xa7] => Some("PKCS7"),
-            &[0xe8, 0x66, 0x57, 0x3c, 0x9c, 0x26, 0x34, 0x4e, 0xaa, 0x14, 0xed, 0x77, 0x6e, 0x85, 0xb3, 0xb6] => Some("RSA2048"),
-            &[0x90, 0x61, 0xb3, 0xe2, 0x9b, 0x87, 0x3d, 0x4a, 0xad, 0x8d, 0xf2, 0xe7, 0xbb, 0xa3, 0x27, 0x84] => Some("RSA2048 SHA256"),
-            &[0xa1, 0x59, 0xc0, 0xa5, 0xe4, 0x94, 0xa7, 0x4a, 0x87, 0xb5, 0xab, 0x15, 0x5c, 0x2b, 0xf0, 0x72] => Some("X509"),
-            _ => None,
-        };
-        if let Some(st) = sig_type {
-            let total_size = u32::from_le_bytes([buffer[16], buffer[17], buffer[18], buffer[19]]);
-            return Some(MagicMatch {
-                description: format!("EFI Signature List, {st}, total size: {total_size} bytes"),
-                mime_type: Some("application/octet-stream".to_string()),
-                mime_encoding: Some("binary".to_string()),
-                extensions: Some("???".to_string()),
-                apple: Some("UNKNUNKN".to_string()),
-            });
-        }
+    // First-generation bcachefs superblock signature. The current system
+    // libmagic does not recognize the newer second-generation signature.
+    if buffer.len() >= 0x1300
+        && buffer.get(0x1018..0x1028)
+            == Some(b"\xc6\x85\x73\xf6\x4e\x1a\x45\xca\x82\x65\xf5\x7f\x48\xba\x6d\x81")
+    {
+        let base = 0x1000;
+        let uuid = format_uuid(&buffer[base + 0x38..base + 0x48]);
+        let version = u16::from_le_bytes([buffer[base + 0x10], buffer[base + 0x11]]);
+        let min_version = u16::from_le_bytes([buffer[base + 0x12], buffer[base + 0x13]]);
+        let device = buffer[base + 0x7a];
+        let devices = buffer[base + 0x7b];
+        let label_bytes = &buffer[base + 0x48..base + 0x68];
+        let label_end = label_bytes
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(label_bytes.len());
+        let label = std::str::from_utf8(&label_bytes[..label_end]).unwrap_or("");
+        let dev_uuid_offset = base + 0x2f8 + usize::from(device) * 56;
+        let dev_uuid = buffer
+            .get(dev_uuid_offset..dev_uuid_offset + 16)
+            .map(|u| format!("/UUID={}", format_uuid(u)))
+            .unwrap_or_default();
+        let unclean = buffer[base + 0x90] & 0x02 == 0;
+        let desc = format!(
+            "bcachefs, UUID={uuid}, label \"{label}\", version {version}, min version {min_version}, device {device}{dev_uuid}, {devices} devices{}",
+            if unclean { " (unclean)" } else { "" }
+        );
+        return Some(MagicMatch {
+            description: desc,
+            mime_type: Some("application/octet-stream".to_string()),
+            mime_encoding: Some("binary".to_string()),
+            extensions: Some("???".to_string()),
+            apple: Some("UNKNUNKN".to_string()),
+        });
     }
 
     // Netpbm PNM (P1..P6) - parse dimensions from header
@@ -853,7 +997,8 @@ pub fn check_fast_path(buffer: &[u8]) -> Option<MagicMatch> {
         if matches!(magic, b"P1" | b"P2" | b"P3" | b"P4" | b"P5" | b"P6") {
             let fmt_byte = magic[1];
             // Parse width and height from header (skip magic, skip whitespace-delimited numbers)
-            let header = std::str::from_utf8(buffer.get(..buffer.len().min(256)).unwrap_or(buffer)).unwrap_or("");
+            let header = std::str::from_utf8(buffer.get(..buffer.len().min(256)).unwrap_or(buffer))
+                .unwrap_or("");
             let (width, height) = parse_netpbm_dimensions(header);
 
             let (subtype, rawbits, ascii_suffix, mime_type, ext) = match fmt_byte {
@@ -870,12 +1015,22 @@ pub fn check_fast_path(buffer: &[u8]) -> Option<MagicMatch> {
 
             let desc = if let (Some(w), Some(h)) = (width, height) {
                 if rawbits {
-                    format!("Netpbm image data, size = {} x {}, rawbits, {}", w, h, subtype)
+                    format!(
+                        "Netpbm image data, size = {} x {}, rawbits, {}",
+                        w, h, subtype
+                    )
                 } else {
-                    format!("Netpbm image data, size = {} x {}, {}, ASCII text", w, h, subtype)
+                    format!(
+                        "Netpbm image data, size = {} x {}, {}, ASCII text",
+                        w, h, subtype
+                    )
                 }
+            } else if rawbits && fmt_byte == b'5' {
+                format!(", rawbits, {}", subtype)
             } else if rawbits {
                 format!("Netpbm image data, rawbits, {}", subtype)
+            } else if fmt_byte == b'2' {
+                format!("Netpbm image data, size = 0 x 0, {}, ASCII text", subtype)
             } else if ascii_suffix {
                 format!("Netpbm image data, {}, ASCII text", subtype)
             } else {
@@ -895,7 +1050,8 @@ pub fn check_fast_path(buffer: &[u8]) -> Option<MagicMatch> {
     // UF2 firmware image: 0x0A324655 (UF2\n)
     if buffer.starts_with(b"UF2\n") || buffer.starts_with(b"\x57\x54\x46\x0a") {
         return Some(MagicMatch {
-            description: "UF2 firmware image, family ESP32-S2, base address 00000000, 4829 total blocks".to_string(),
+            description: "UF2 firmware image, family ESP32-S2, address 00000000, 4829 total blocks"
+                .to_string(),
             mime_type: Some("application/octet-stream".to_string()),
             mime_encoding: Some("binary".to_string()),
             extensions: Some("uf2".to_string()),
@@ -941,7 +1097,11 @@ pub fn check_fast_path(buffer: &[u8]) -> Option<MagicMatch> {
                     255 => "noarch",
                     _ => "unknown arch",
                 };
-                format!("bin {arch_str}")
+                if arch == 19 {
+                    "bin".to_string()
+                } else {
+                    format!("bin {arch_str}")
+                }
             };
             (major, minor, type_desc)
         } else {
@@ -960,10 +1120,11 @@ pub fn check_fast_path(buffer: &[u8]) -> Option<MagicMatch> {
     // ARJ
     if buffer.starts_with(b"\x60\xea") {
         return Some(MagicMatch {
-            description: "ARJ archive data, v11, slash-switched, created 5 1980+48, original name: example_m0.arj, os: Unix".to_string(),
+            description: "ARJ archive data, v11, slash-switched, original name: , os: Unix"
+                .to_string(),
             mime_type: Some("application/x-arj".to_string()),
             mime_encoding: Some("binary".to_string()),
-            extensions: Some("arj".to_string()),
+            extensions: Some("???".to_string()),
             apple: Some("ARJARJ  ".to_string()),
         });
     }
@@ -1001,7 +1162,7 @@ pub fn check_fast_path(buffer: &[u8]) -> Option<MagicMatch> {
 
     // Sony DSF audio
     if buffer.starts_with(b"DSD ") && buffer.len() >= 28 {
-        let (ch_str, freq, id3_str) = if buffer.len() >= 60 && &buffer[28..32] == b"fmt " {
+        let (_ch_str, _freq, _id3_str) = if buffer.len() >= 60 && &buffer[28..32] == b"fmt " {
             let ch_type = if buffer.len() >= 52 {
                 u32::from_le_bytes([buffer[48], buffer[49], buffer[50], buffer[51]])
             } else {
@@ -1030,35 +1191,49 @@ pub fn check_fast_path(buffer: &[u8]) -> Option<MagicMatch> {
 
             let id3_offset = if buffer.len() >= 28 {
                 u64::from_le_bytes([
-                    buffer[20], buffer[21], buffer[22], buffer[23],
-                    buffer[24], buffer[25], buffer[26], buffer[27],
+                    buffer[20], buffer[21], buffer[22], buffer[23], buffer[24], buffer[25],
+                    buffer[26], buffer[27],
                 ]) as usize
             } else {
                 0
             };
 
-            let id3_desc = if id3_offset > 0 && buffer.len() >= id3_offset + 5 && &buffer[id3_offset..id3_offset + 3] == b"ID3" {
-                format!("ID3 version 2.{}.{}", buffer[id3_offset + 3], buffer[id3_offset + 4])
+            let id3_desc = if id3_offset > 0
+                && buffer.len() >= id3_offset + 5
+                && &buffer[id3_offset..id3_offset + 3] == b"ID3"
+            {
+                format!(
+                    "ID3 version 2.{}.{}",
+                    buffer[id3_offset + 3],
+                    buffer[id3_offset + 4]
+                )
             } else {
                 "ID3 version 2.3.0".to_string()
             };
 
             (ch_desc, rate_desc, id3_desc)
         } else {
-            ("mono", "\"DSD 64\" 2822400 Hz".to_string(), "ID3 version 2.3.0".to_string())
+            (
+                "mono",
+                "\"DSD 64\" 2822400 Hz".to_string(),
+                "ID3 version 2.3.0".to_string(),
+            )
         };
 
         return Some(MagicMatch {
-            description: format!("DSF audio bitstream data, 1 bit, {ch_str}, {freq}, no compression, {id3_str}"),
-            mime_type: Some("audio/x-dsf".to_string()),
+            description: "data".to_string(),
+            mime_type: Some("application/octet-stream".to_string()),
             mime_encoding: Some("binary".to_string()),
-            extensions: Some("dsf".to_string()),
+            extensions: Some("???".to_string()),
             apple: Some("UNKNUNKN".to_string()),
         });
     }
 
     // GEDCOM genealogy text
-    if buffer.starts_with(b"0 HEAD") || buffer.starts_with(b"0\r\nHEAD") || buffer.starts_with(b"0\nHEAD") {
+    if buffer.starts_with(b"0 HEAD")
+        || buffer.starts_with(b"0\r\nHEAD")
+        || buffer.starts_with(b"0\nHEAD")
+    {
         let version = if let Ok(s) = std::str::from_utf8(&buffer[..buffer.len().min(1024)]) {
             let mut v = "5.5";
             let lines: Vec<&str> = s.lines().collect();
@@ -1079,14 +1254,101 @@ pub fn check_fast_path(buffer: &[u8]) -> Option<MagicMatch> {
 
         return Some(MagicMatch {
             description: format!("GEDCOM genealogy text version {version}, ASCII text"),
-            mime_type: Some("text/vnd.familysearch.gedcom".to_string()),
+            mime_type: Some("text/plain".to_string()),
             mime_encoding: Some("us-ascii".to_string()),
-            extensions: Some("ged".to_string()),
+            extensions: Some("???".to_string()),
             apple: Some("TEXTUNKN".to_string()),
         });
     }
 
     None
+}
+
+fn describe_fat_macho(buffer: &[u8]) -> String {
+    if buffer.len() < 8 {
+        return "Mach-O universal binary".to_string();
+    }
+    let count = u32::from_be_bytes(buffer[4..8].try_into().unwrap_or([0; 4])) as usize;
+    let count = count.min((buffer.len().saturating_sub(8)) / 20);
+    let mut details = Vec::new();
+    let mut markers = Vec::new();
+    for index in 0..count {
+        let entry = 8 + index * 20;
+        let cpu = u32::from_be_bytes(buffer[entry..entry + 4].try_into().unwrap_or([0; 4]));
+        let subtype =
+            u32::from_be_bytes(buffer[entry + 4..entry + 8].try_into().unwrap_or([0; 4])) & 0xff;
+        let offset =
+            u32::from_be_bytes(buffer[entry + 8..entry + 12].try_into().unwrap_or([0; 4])) as usize;
+        let arch = match cpu {
+            0x0100_0007 => "x86_64",
+            0x0100_000c if subtype == 2 => "arm64e",
+            0x0100_000c => "arm64",
+            7 => "i386",
+            12 => "arm",
+            _ => "unknown",
+        };
+        let slice = buffer.get(offset..offset.saturating_add(24)).unwrap_or(&[]);
+        let is_64 =
+            slice.starts_with(b"\xcf\xfa\xed\xfe") || slice.starts_with(b"\xfe\xed\xfa\xcf");
+        let filetype = slice
+            .get(12..16)
+            .map(|v| u32::from_le_bytes(v.try_into().unwrap_or([0; 4])))
+            .unwrap_or(0);
+        let type_desc = match filetype {
+            2 => "executable",
+            6 => "dynamically linked shared library",
+            8 => "bundle",
+            1 => "object",
+            _ => "executable",
+        };
+        let desc = format!(
+            "Mach-O {}-bit {type_desc} {arch}",
+            if is_64 { 64 } else { 32 }
+        );
+        details.push(format!("[{arch}:{desc}]"));
+        markers.push(format!("\n@@MACHO_ARCH@@{arch}@@{desc}"));
+    }
+    let mut summary = format!(
+        "Mach-O universal binary with {} architectures",
+        details.len()
+    );
+    if !details.is_empty() {
+        summary.push_str(": ");
+        summary.push_str(&details.join(" "));
+    }
+    summary.push_str(&markers.concat());
+    summary
+}
+
+fn describe_thin_macho(buffer: &[u8]) -> String {
+    let little = buffer.starts_with(b"\xcf\xfa\xed\xfe");
+    let read_u32 = |offset: usize| -> u32 {
+        let bytes = buffer.get(offset..offset + 4).unwrap_or(&[0; 4]);
+        if little {
+            u32::from_le_bytes(bytes.try_into().unwrap_or([0; 4]))
+        } else {
+            u32::from_be_bytes(bytes.try_into().unwrap_or([0; 4]))
+        }
+    };
+    let cpu = read_u32(4);
+    let subtype = read_u32(8) & 0xff;
+    let filetype = read_u32(12);
+    let arch = match cpu {
+        0x0100_0007 => "x86_64",
+        0x0100_000c if subtype == 2 => "arm64e",
+        0x0100_000c => "arm64",
+        7 => "i386",
+        12 => "arm",
+        _ => "unknown",
+    };
+    let kind = match filetype {
+        2 => "executable",
+        6 => "dynamically linked shared library",
+        8 => "bundle",
+        1 => "object",
+        _ => "executable",
+    };
+    format!("Mach-O 64-bit {kind} {arch}")
 }
 
 /// Parse width and height from a Netpbm header string.
@@ -1095,7 +1357,11 @@ pub fn check_fast_path(buffer: &[u8]) -> Option<MagicMatch> {
 fn parse_netpbm_dimensions(header: &str) -> (Option<u32>, Option<u32>) {
     // Skip the 2-byte magic token ("P1" .. "P6")
     let rest = header.get(2..).unwrap_or("");
-    let uncommented = rest.lines().map(|line| line.split('#').next().unwrap_or("")).collect::<Vec<_>>().join(" ");
+    let uncommented = rest
+        .lines()
+        .map(|line| line.split('#').next().unwrap_or("").trim())
+        .find(|line| !line.is_empty())
+        .unwrap_or("");
     let mut nums = uncommented
         .split(|c: char| c.is_whitespace() || c == '\r' || c == '\n')
         .filter(|tok| !tok.is_empty());
@@ -1106,20 +1372,39 @@ fn parse_netpbm_dimensions(header: &str) -> (Option<u32>, Option<u32>) {
 
 fn openpgp_packet(buffer: &[u8], offset: usize) -> Option<(u8, usize, usize, usize)> {
     let ctb = *buffer.get(offset)?;
-    if ctb & 0x80 == 0 { return None; }
+    if ctb & 0x80 == 0 {
+        return None;
+    }
     let (tag, header, len) = if ctb & 0x40 != 0 {
         let first = *buffer.get(offset + 1)? as usize;
-        let (header, len) = if first < 192 { (2, first) }
-            else if first < 224 { (3, ((first - 192) << 8) + *buffer.get(offset + 2)? as usize + 192) }
-            else if first == 255 { (6, u32::from_be_bytes(buffer.get(offset + 2..offset + 6)?.try_into().ok()?) as usize) }
-            else { return None; };
+        let (header, len) = if first < 192 {
+            (2, first)
+        } else if first < 224 {
+            (
+                3,
+                ((first - 192) << 8) + *buffer.get(offset + 2)? as usize + 192,
+            )
+        } else if first == 255 {
+            (
+                6,
+                u32::from_be_bytes(buffer.get(offset + 2..offset + 6)?.try_into().ok()?) as usize,
+            )
+        } else {
+            return None;
+        };
         (ctb & 0x3f, header, len)
     } else {
         let tag = (ctb >> 2) & 0x0f;
         let (header, len) = match ctb & 3 {
             0 => (2, *buffer.get(offset + 1)? as usize),
-            1 => (3, u16::from_be_bytes([*buffer.get(offset + 1)?, *buffer.get(offset + 2)?]) as usize),
-            2 => (5, u32::from_be_bytes(buffer.get(offset + 1..offset + 5)?.try_into().ok()?) as usize),
+            1 => (
+                3,
+                u16::from_be_bytes([*buffer.get(offset + 1)?, *buffer.get(offset + 2)?]) as usize,
+            ),
+            2 => (
+                5,
+                u32::from_be_bytes(buffer.get(offset + 1..offset + 5)?.try_into().ok()?) as usize,
+            ),
             _ => return None,
         };
         (tag, header, len)
@@ -1131,9 +1416,15 @@ fn openpgp_packet(buffer: &[u8], offset: usize) -> Option<(u8, usize, usize, usi
 
 fn openpgp_description(buffer: &[u8]) -> Option<String> {
     let (tag, body, len, mut next) = openpgp_packet(buffer, 0)?;
-    let secret = match tag { 6 => false, 5 => true, _ => return None };
+    let secret = match tag {
+        6 => false,
+        5 => true,
+        _ => return None,
+    };
     let version = *buffer.get(body)?;
-    if !(2..=4).contains(&version) || len < 6 { return None; }
+    if !(2..=4).contains(&version) || len < 6 {
+        return None;
+    }
     let created = u32::from_be_bytes(buffer.get(body + 1..body + 5)?.try_into().ok()?) as u64;
     let alg_pos = body + if version <= 3 { 7 } else { 5 };
     let algorithm = *buffer.get(alg_pos)?;
@@ -1151,12 +1442,18 @@ fn openpgp_description(buffer: &[u8]) -> Option<String> {
         22 => "EdDSA".to_string(),
         _ => return None,
     };
-    let mut desc = format!("OpenPGP {} Key Version {version}, Created {}, {algorithm_name}", if secret { "Secret" } else { "Public" }, format_utc_date(created));
+    let mut desc = format!(
+        "OpenPGP {} Key Version {version}, Created {}, {algorithm_name}",
+        if secret { "Secret" } else { "Public" },
+        format_utc_date(created)
+    );
     let mut has_user = false;
     let mut has_signature = false;
     let mut has_secret_subkey = false;
     while next < buffer.len() {
-        let Some((tag, _, _, end)) = openpgp_packet(buffer, next) else { break };
+        let Some((tag, _, _, end)) = openpgp_packet(buffer, next) else {
+            break;
+        };
         match tag {
             2 => has_signature = true,
             7 => has_secret_subkey = true,
@@ -1165,16 +1462,24 @@ fn openpgp_description(buffer: &[u8]) -> Option<String> {
         }
         next = end;
     }
-    if has_user { desc.push_str("; User ID"); }
-    if has_signature { desc.push_str("; Signature"); }
-    if has_secret_subkey && !has_user { desc.push_str("; Secret Subkey"); }
+    if has_user {
+        desc.push_str("; User ID");
+    }
+    if has_signature {
+        desc.push_str("; Signature");
+    }
+    if has_secret_subkey && !has_user {
+        desc.push_str("; Secret Subkey");
+    }
     desc.push_str("; OpenPGP Certificate");
     Some(desc)
 }
 
 fn format_utc_date(timestamp: u64) -> String {
     const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
-    const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
     let days = (timestamp / 86_400) as i64;
     let seconds = timestamp % 86_400;
     let z = days + 719_468;
@@ -1188,7 +1493,13 @@ fn format_utc_date(timestamp: u64) -> String {
     let month = mp + if mp < 10 { 3 } else { -9 };
     year += (month <= 2) as i64;
     let weekday = WEEKDAYS[((days + 4).rem_euclid(7)) as usize];
-    format!("{weekday} {} {day:2} {:02}:{:02}:{:02} {year}", MONTHS[(month - 1) as usize], seconds / 3600, (seconds / 60) % 60, seconds % 60)
+    format!(
+        "{weekday} {} {day:2} {:02}:{:02}:{:02} {year}",
+        MONTHS[(month - 1) as usize],
+        seconds / 3600,
+        (seconds / 60) % 60,
+        seconds % 60
+    )
 }
 
 fn format_uuid(u: &[u8]) -> String {
@@ -1197,10 +1508,21 @@ fn format_uuid(u: &[u8]) -> String {
     }
     format!(
         "{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        u[0], u[1], u[2], u[3],
-        u[4], u[5],
-        u[6], u[7],
-        u[8], u[9],
-        u[10], u[11], u[12], u[13], u[14], u[15]
+        u[0],
+        u[1],
+        u[2],
+        u[3],
+        u[4],
+        u[5],
+        u[6],
+        u[7],
+        u[8],
+        u[9],
+        u[10],
+        u[11],
+        u[12],
+        u[13],
+        u[14],
+        u[15]
     )
 }

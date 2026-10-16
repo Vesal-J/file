@@ -108,8 +108,14 @@ pub fn uu_app() -> Command {
                 .default_value(":"),
         )
         .arg(
-            Arg::new("mime")
+            Arg::new("no_classify")
                 .short('i')
+                .help("Do not further classify regular files")
+                .action(ArgAction::SetTrue),
+        )
+        .arg(
+            Arg::new("mime")
+                .short('I')
                 .long("mime")
                 .help("Output MIME type strings (--mime-type and --mime-encoding)")
                 .action(ArgAction::SetTrue),
@@ -262,6 +268,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
     config.apple = matches.get_flag("apple");
     config.extension = matches.get_flag("extension");
     config.keep_going = matches.get_flag("keep_going");
+    config.no_classify = matches.get_flag("no_classify");
 
     if matches.get_flag("dereference") {
         config.dereference = true;
@@ -287,10 +294,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
             if let Some(kind) = TestKind::parse(ex) {
                 config.exclude_tests.insert(kind);
             } else {
-                return Err(USimpleError::new(
-                    1,
-                    format!("unknown test `{ex}`"),
-                ));
+                return Err(USimpleError::new(1, format!("unknown test `{ex}`")));
             }
         }
     }
@@ -343,7 +347,10 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
     }
 
     if config.checking_printout {
-        println!("Checking printout of magic database rules ({} loaded)", magic_db.custom_rules.len());
+        println!(
+            "Checking printout of magic database rules ({} loaded)",
+            magic_db.custom_rules.len()
+        );
         return Ok(());
     }
     if config.compile {
@@ -417,11 +424,21 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
             }
             Err(e) => {
                 had_error = true;
-                if config.brief {
-                    eprintln!("cannot open: {e}");
-                } else {
-                    eprintln!("{display_name}: cannot open ({e})");
-                }
+                let message = e.to_string();
+                let message = message
+                    .split_once(" (os error ")
+                    .map_or(message.as_str(), |(plain, _)| plain);
+                let error_result = engine::ClassificationResult::new(
+                    format!("cannot open: {message}"),
+                    format!("cannot open: {message}"),
+                    format!("cannot open: {message}"),
+                    format!("cannot open: {message}"),
+                    format!("cannot open: {message}"),
+                );
+                println!(
+                    "{}",
+                    output::format_result(&display_name, &error_result, &config, padding)
+                );
             }
         }
     }

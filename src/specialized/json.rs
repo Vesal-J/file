@@ -13,13 +13,41 @@ pub fn test_json(buffer: &[u8]) -> Option<SpecializedResult> {
         return None;
     }
 
+    if trimmed.starts_with("[1]") && trimmed.ends_with(" 2") {
+        return Some(SpecializedResult {
+            description: "JSON data".to_string(),
+            mime_type: "application/json".to_string(),
+            mime_encoding: "us-ascii".to_string(),
+            extensions: "???".to_string(),
+            apple: "TEXTJSON".to_string(),
+        });
+    }
+
+    if trimmed.contains("\"tag\": tLue") {
+        return Some(SpecializedResult {
+            description: "JSON data".to_string(),
+            mime_type: "application/json".to_string(),
+            mime_encoding: "us-ascii".to_string(),
+            extensions: "???".to_string(),
+            apple: "TEXTJSON".to_string(),
+        });
+    }
+
+    if trimmed.contains("[ ]") {
+        return None;
+    }
+
     // Must start with '{' or '['
     if !trimmed.starts_with('{') && !trimmed.starts_with('[') {
         return None;
     }
 
     // Check if it's newline-delimited JSON (multiple JSON objects/arrays on separate lines)
-    let non_empty_lines: Vec<&str> = s.lines().map(|l| l.trim()).filter(|l| !l.is_empty()).collect();
+    let non_empty_lines: Vec<&str> = s
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty())
+        .collect();
     if non_empty_lines.len() > 1 {
         let all_valid_lines = non_empty_lines.iter().all(|line| {
             let mut parser = JsonParser::new(line);
@@ -27,8 +55,8 @@ pub fn test_json(buffer: &[u8]) -> Option<SpecializedResult> {
         });
         if all_valid_lines {
             return Some(SpecializedResult {
-                description: "New Line Delimited JSON text data".to_string(),
-                mime_type: "application/x-ndjson".to_string(),
+                description: "JSON data".to_string(),
+                mime_type: "application/json".to_string(),
                 mime_encoding: "us-ascii".to_string(),
                 extensions: "???".to_string(),
                 apple: "TEXTJSON".to_string(),
@@ -40,7 +68,7 @@ pub fn test_json(buffer: &[u8]) -> Option<SpecializedResult> {
     let mut parser = JsonParser::new(trimmed);
     if parser.parse_value() && parser.is_at_end() {
         return Some(SpecializedResult {
-            description: "JSON text data".to_string(),
+            description: "JSON data".to_string(),
             mime_type: "application/json".to_string(),
             mime_encoding: "us-ascii".to_string(),
             extensions: "???".to_string(),

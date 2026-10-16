@@ -39,13 +39,23 @@ pub fn test_cdf(buffer: &[u8]) -> Option<SpecializedResult> {
         )
     } else if buffer.windows(17).any(|w| w == b"HWP Document File")
         || buffer.windows(10).any(|w| w == b"FileHeader")
-        || buffer.windows(20).any(|w| w == b"F\0i\0l\0e\0H\0e\0a\0d\0e\0r\0")
+        || buffer
+            .windows(20)
+            .any(|w| w == b"F\0i\0l\0e\0H\0e\0a\0d\0e\0r\0")
     {
-        (
-            "Hancom HWP (Hangul Word Processor) file, version 5.0",
-            "application/x-hwp",
-            "hwp",
-        )
+        if buffer.starts_with(b"HWP Document File V3") {
+            (
+                "Hangul (Korean) Word Processor File 3.0",
+                "application/x-hwp",
+                "???",
+            )
+        } else {
+            (
+                "Hangul (Korean) Word Processor File 5.x",
+                "application/x-hwp",
+                "hwp",
+            )
+        }
     } else {
         (
             "Composite Document File V2 Document",

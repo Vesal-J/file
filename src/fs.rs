@@ -17,7 +17,11 @@ pub struct FsResult {
 }
 
 impl FsResult {
-    pub fn new(description: impl Into<String>, mime_type: impl Into<String>, mime_encoding: impl Into<String>) -> Self {
+    pub fn new(
+        description: impl Into<String>,
+        mime_type: impl Into<String>,
+        mime_encoding: impl Into<String>,
+    ) -> Self {
         Self {
             description: description.into(),
             mime_type: mime_type.into(),
@@ -28,7 +32,7 @@ impl FsResult {
     }
 
     pub fn empty() -> Self {
-        Self::new("empty", "application/x-empty", "binary")
+        Self::new("empty", "inode/x-empty", "binary")
     }
 
     pub fn directory() -> Self {
@@ -60,6 +64,13 @@ pub fn test_filesystem(path: &Path, config: &Config) -> std::io::Result<Option<F
     // 2. Handle symlinks
     if file_type.is_symlink() {
         if !config.dereference {
+            if config.no_classify {
+                if let Ok(target_meta) = fs::metadata(path) {
+                    if target_meta.is_file() {
+                        return inspect_target_metadata(path, &target_meta, config);
+                    }
+                }
+            }
             // Describe the symlink itself
             let target = match fs::read_link(path) {
                 Ok(t) => t.display().to_string(),
@@ -104,6 +115,35 @@ fn inspect_target_metadata(
 
     if file_type.is_dir() {
         return Ok(Some(FsResult::directory()));
+    }
+
+    if config.no_classify && meta.is_file() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::MetadataExt;
+            let mode = meta.mode();
+            let mut prefix = String::new();
+            if mode & 0o4000 != 0 {
+                prefix.push_str("setuid");
+            }
+            if mode & 0o2000 != 0 {
+                prefix.push_str("setgid");
+            }
+            if mode & 0o1000 != 0 {
+                prefix.push_str("sticky");
+            }
+            return Ok(Some(FsResult::new(
+                format!("{prefix}regular file"),
+                "application/octet-stream",
+                "binary",
+            )));
+        }
+        #[cfg(not(unix))]
+        return Ok(Some(FsResult::new(
+            "regular file",
+            "application/octet-stream",
+            "binary",
+        )));
     }
 
     #[cfg(unix)]
@@ -168,7 +208,7 @@ fn inspect_target_metadata(
             if !parts.is_empty() {
                 return Ok(Some(FsResult::new(
                     format!("{}, empty", parts.join(", ")),
-                    "application/x-empty",
+                    "inode/x-empty",
                     "binary",
                 )));
             }

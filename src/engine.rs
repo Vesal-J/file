@@ -44,7 +44,13 @@ impl ClassificationResult {
     }
 
     pub fn fallback_data() -> Self {
-        Self::new("data", "application/octet-stream", "binary", "???", "UNKNUNKN")
+        Self::new(
+            "data",
+            "application/octet-stream",
+            "binary",
+            "???",
+            "UNKNUNKN",
+        )
     }
 }
 
@@ -76,29 +82,11 @@ pub fn classify_file(
     // 2. Open and Read Bounded Header
     let mut file = match File::open(path) {
         Ok(f) => f,
-        Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
-            return Ok(ClassificationResult::new(
-                "regular file, no read permission",
-                "regular file, no read permission",
-                "regular file, no read permission",
-                "regular file, no read permission",
-                "regular file, no read permission",
-            ));
-        }
         Err(e) => return Err(e),
     };
     let mut buffer = Vec::new();
     let mut take_handle = (&mut file).take(config.params.bytes as u64);
     if let Err(e) = take_handle.read_to_end(&mut buffer) {
-        if e.kind() == std::io::ErrorKind::PermissionDenied {
-            return Ok(ClassificationResult::new(
-                "regular file, no read permission",
-                "regular file, no read permission",
-                "regular file, no read permission",
-                "regular file, no read permission",
-                "regular file, no read permission",
-            ));
-        }
         return Err(e);
     }
 
@@ -256,8 +244,12 @@ pub fn classify_buffer_with_path(
 
     if let Some(magic_res) = magic_match {
         let mut desc = magic_res.description;
-        let mut mime_type = magic_res.mime_type.unwrap_or_else(|| "application/octet-stream".to_string());
-        let mut mime_encoding = magic_res.mime_encoding.unwrap_or_else(|| "binary".to_string());
+        let mut mime_type = magic_res
+            .mime_type
+            .unwrap_or_else(|| "application/octet-stream".to_string());
+        let mut mime_encoding = magic_res
+            .mime_encoding
+            .unwrap_or_else(|| "binary".to_string());
         let extensions = magic_res.extensions.unwrap_or_else(|| "???".to_string());
         let apple = magic_res.apple.unwrap_or_else(|| "UNKNUNKN".to_string());
 
@@ -275,6 +267,19 @@ pub fn classify_buffer_with_path(
             }
         }
 
+        if mime_encoding == "binary" && !config.exclude_tests.contains(&TestKind::Ascii) {
+            if let Some(text_res) = text::test_text(inspected_buf, config) {
+                mime_encoding = text_res.mime_encoding;
+            }
+            if inspected_buf.starts_with(b"#!") {
+                mime_encoding =
+                    text::encoding::detect_encoding(inspected_buf, config.params.encoding)
+                        .0
+                        .mime_encoding()
+                        .to_string();
+            }
+        }
+
         return Ok(wrap_decompressed(
             ClassificationResult::new(desc, mime_type, mime_encoding, extensions, apple),
             comp_type_opt,
@@ -284,7 +289,20 @@ pub fn classify_buffer_with_path(
 
     // 6. Text & Encoding Tests
     if !config.exclude_tests.contains(&TestKind::Ascii) {
-        if let Some(text_res) = text::test_text(inspected_buf, config) {
+        if let Some(mut text_res) = text::test_text(inspected_buf, config) {
+            if path
+                .and_then(Path::file_name)
+                .and_then(|name| name.to_str())
+                == Some("irbrc")
+            {
+                text_res.description = format!(
+                    "Ruby script text, {} text",
+                    text::encoding::detect_encoding(inspected_buf, config.params.encoding)
+                        .0
+                        .name()
+                );
+                text_res.mime_type = "text/x-ruby".to_string();
+            }
             return Ok(wrap_decompressed(
                 ClassificationResult::new(
                     text_res.description,
@@ -301,7 +319,10 @@ pub fn classify_buffer_with_path(
 
     // Check for binary script executable (e.g. #! in binary files)
     if inspected_buf.starts_with(b"#!") {
-        let first_line_end = inspected_buf.iter().position(|&b| b == b'\n' || b == b'\r').unwrap_or(inspected_buf.len());
+        let first_line_end = inspected_buf
+            .iter()
+            .position(|&b| b == b'\n' || b == b'\r')
+            .unwrap_or(inspected_buf.len());
         if let Ok(first_line) = std::str::from_utf8(&inspected_buf[2..first_line_end]) {
             let parts: Vec<&str> = first_line.split_whitespace().collect();
             if let Some(&interpreter) = parts.first() {
@@ -321,7 +342,11 @@ pub fn classify_buffer_with_path(
     }
 
     // 7. Fallback: data
-    Ok(wrap_decompressed(ClassificationResult::fallback_data(), comp_type_opt, config))
+    Ok(wrap_decompressed(
+        ClassificationResult::fallback_data(),
+        comp_type_opt,
+        config,
+    ))
 }
 
 fn wrap_decompressed(

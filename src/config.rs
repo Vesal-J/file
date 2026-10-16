@@ -87,8 +87,8 @@ impl TestKind {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MimeMode {
     None,
-    All,      // -i / --mime (both type and encoding)
-    TypeOnly, // --mime-type
+    All,          // -i / --mime (both type and encoding)
+    TypeOnly,     // --mime-type
     EncodingOnly, // --mime-encoding
 }
 
@@ -104,6 +104,7 @@ pub struct Config {
     pub files_from: Option<PathBuf>,
     pub separator: String,
     pub mime_mode: MimeMode,
+    pub no_classify: bool,
     pub apple: bool,
     pub extension: bool,
     pub keep_going: bool,
@@ -122,18 +123,18 @@ pub struct Config {
 
 impl Default for Config {
     fn default() -> Self {
-        let posixly_correct = std::env::var_os("POSIXLY_CORRECT").is_some();
         Self {
             brief: false,
             checking_printout: false,
             compile: false,
             debug: false,
-            // In POSIX mode, follow symlinks by default. Otherwise, do not follow.
-            dereference: posixly_correct,
+            // The reference file utility follows symlinks by default.
+            dereference: true,
             exclude_tests: HashSet::new(),
             files_from: None,
             separator: ":".to_string(),
             mime_mode: MimeMode::None,
+            no_classify: false,
             apple: false,
             extension: false,
             keep_going: false,

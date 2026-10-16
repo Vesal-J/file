@@ -56,8 +56,18 @@ pub fn test_text(buffer: &[u8], config: &Config) -> Option<TextResult> {
     let scan = buffer.get(..buffer.len().min(8192)).unwrap_or(buffer);
     let decoded = match charset {
         crate::text::encoding::Charset::Utf16Le | crate::text::encoding::Charset::Utf16Be => {
-            let data = if scan.starts_with(b"\xff\xfe") || scan.starts_with(b"\xfe\xff") { &scan[2..] } else { scan };
-            let units = data.chunks_exact(2).map(|b| if charset == crate::text::encoding::Charset::Utf16Le { u16::from_le_bytes([b[0], b[1]]) } else { u16::from_be_bytes([b[0], b[1]]) });
+            let data = if scan.starts_with(b"\xff\xfe") || scan.starts_with(b"\xfe\xff") {
+                &scan[2..]
+            } else {
+                scan
+            };
+            let units = data.chunks_exact(2).map(|b| {
+                if charset == crate::text::encoding::Charset::Utf16Le {
+                    u16::from_le_bytes([b[0], b[1]])
+                } else {
+                    u16::from_be_bytes([b[0], b[1]])
+                }
+            });
             Some(String::from_utf16_lossy(&units.collect::<Vec<_>>()))
         }
         _ => std::str::from_utf8(scan).ok().map(str::to_owned),
@@ -70,7 +80,10 @@ pub fn test_text(buffer: &[u8], config: &Config) -> Option<TextResult> {
             let fields: Vec<&str> = header.split(';').collect();
             if fields.len() >= 2 {
                 return Some(TextResult {
-                    description: format!("Ansible Vault, version {}, encryption {}", fields[0], fields[1]),
+                    description: format!(
+                        "Ansible Vault, version {}, encryption {}",
+                        fields[0], fields[1]
+                    ),
                     mime_type: "text/plain".to_string(),
                     mime_encoding: mime_encoding.to_string(),
                     extensions: "???".to_string(),
@@ -98,26 +111,69 @@ pub fn test_text(buffer: &[u8], config: &Config) -> Option<TextResult> {
         if trimmed.starts_with("<?xml") || trimmed.starts_with("<?XML") {
             if text.contains("<osm") {
                 return Some(TextResult {
-                    description: format!("OpenStreetMap XML data, {charset_name} text{line_suffix}"),
-                    mime_type: "text/plain".to_string(),
+                    description: "OpenStreetMap XML data".to_string(),
+                    mime_type: "text/xml".to_string(),
                     mime_encoding: mime_encoding.to_string(),
                     extensions: "???".to_string(),
                     apple: "TEXT????".to_string(),
                 });
             }
-            if text.contains("<svg") || text.contains("<SVG") {
+            if !matches!(
+                charset,
+                crate::text::encoding::Charset::Utf16Le | crate::text::encoding::Charset::Utf16Be
+            ) && (text.contains("<svg") || text.contains("<SVG"))
+            {
                 return Some(TextResult {
-                    description: if matches!(charset, crate::text::encoding::Charset::Utf16Le | crate::text::encoding::Charset::Utf16Be) {
-                        format!("SVG Scalable Vector Graphics image, Unicode text, UTF-16, {}-endian text", if charset == crate::text::encoding::Charset::Utf16Le { "little" } else { "big" })
-                    } else { format!("SVG Scalable Vector Graphics image, {charset_name} text{line_suffix}") },
+                    description: if matches!(
+                        charset,
+                        crate::text::encoding::Charset::Utf16Le
+                            | crate::text::encoding::Charset::Utf16Be
+                    ) {
+                        format!(
+                            "SVG Scalable Vector Graphics image, Unicode text, UTF-16, {}-endian text",
+                            if charset == crate::text::encoding::Charset::Utf16Le {
+                                "little"
+                            } else {
+                                "big"
+                            }
+                        )
+                    } else {
+                        format!(
+                            "SVG Scalable Vector Graphics image, {charset_name} text{line_suffix}"
+                        )
+                    },
                     mime_type: "image/svg+xml".to_string(),
                     mime_encoding: mime_encoding.to_string(),
-                    extensions: "svg".to_string(),
+                    extensions: if matches!(
+                        charset,
+                        crate::text::encoding::Charset::Utf16Le
+                            | crate::text::encoding::Charset::Utf16Be
+                    ) {
+                        "???"
+                    } else {
+                        "svg"
+                    }
+                    .to_string(),
                     apple: "TEXTsvg ".to_string(),
                 });
             }
             return Some(TextResult {
-                description: format!("XML 1.0 document, {charset_name} text{line_suffix}"),
+                description: if matches!(
+                    charset,
+                    crate::text::encoding::Charset::Utf16Le
+                        | crate::text::encoding::Charset::Utf16Be
+                ) {
+                    format!(
+                        "XML 1.0 document text, Unicode text, UTF-16, {}-endian text",
+                        if charset == crate::text::encoding::Charset::Utf16Le {
+                            "little"
+                        } else {
+                            "big"
+                        }
+                    )
+                } else {
+                    format!("XML 1.0 document text, {charset_name} text{line_suffix}")
+                },
                 mime_type: "text/xml".to_string(),
                 mime_encoding: mime_encoding.to_string(),
                 extensions: "???".to_string(),
@@ -125,11 +181,27 @@ pub fn test_text(buffer: &[u8], config: &Config) -> Option<TextResult> {
             });
         }
 
-        if trimmed.starts_with("<svg") || trimmed.starts_with("<!DOCTYPE svg") || trimmed.starts_with("<!doctype svg") {
+        if trimmed.starts_with("<svg")
+            || trimmed.starts_with("<!DOCTYPE svg")
+            || trimmed.starts_with("<!doctype svg")
+        {
             return Some(TextResult {
-                description: if matches!(charset, crate::text::encoding::Charset::Utf16Le | crate::text::encoding::Charset::Utf16Be) {
-                    format!("SVG Scalable Vector Graphics image, Unicode text, UTF-16, {}-endian text", if charset == crate::text::encoding::Charset::Utf16Le { "little" } else { "big" })
-                } else { format!("SVG Scalable Vector Graphics image, {charset_name} text{line_suffix}") },
+                description: if matches!(
+                    charset,
+                    crate::text::encoding::Charset::Utf16Le
+                        | crate::text::encoding::Charset::Utf16Be
+                ) {
+                    format!(
+                        "SVG Scalable Vector Graphics image, Unicode text, UTF-16, {}-endian text",
+                        if charset == crate::text::encoding::Charset::Utf16Le {
+                            "little"
+                        } else {
+                            "big"
+                        }
+                    )
+                } else {
+                    format!("SVG Scalable Vector Graphics image, {charset_name} text{line_suffix}")
+                },
                 mime_type: "image/svg+xml".to_string(),
                 mime_encoding: mime_encoding.to_string(),
                 extensions: "svg".to_string(),
@@ -165,7 +237,8 @@ pub fn test_text(buffer: &[u8], config: &Config) -> Option<TextResult> {
         let has_include = text.contains("#include <")
             || text.contains("#include \"")
             || text.lines().any(|l| l.trim_start().starts_with("#include"));
-        let has_c_ifdef = (text.contains("#ifdef ") || text.contains("#ifndef ")) && text.contains("#endif");
+        let has_c_ifdef =
+            (text.contains("#ifdef ") || text.contains("#ifndef ")) && text.contains("#endif");
         let has_c_main = text.contains("int main(") || text.contains("void main(");
 
         if has_include || has_c_ifdef || has_c_main {
@@ -244,14 +317,16 @@ fn check_shebang(
 
     match interpreter {
         "sh" => Some(TextResult {
-            description: format!("POSIX shell script, {charset_name} text executable{line_suffix}"),
+            description: format!("POSIX shell script text executable, {charset_name} text"),
             mime_type: "text/x-shellscript".to_string(),
             mime_encoding: mime_encoding.to_string(),
             extensions: "???".to_string(),
             apple: "TEXTsh  ".to_string(),
         }),
         "bash" => Some(TextResult {
-            description: format!("Bourne-Again shell script, {charset_name} text executable{line_suffix}"),
+            description: format!(
+                "Bourne-Again shell script, {charset_name} text executable{line_suffix}"
+            ),
             mime_type: "text/x-shellscript".to_string(),
             mime_encoding: mime_encoding.to_string(),
             extensions: "???".to_string(),
@@ -271,13 +346,17 @@ fn check_shebang(
             extensions: "???".to_string(),
             apple: "TEXTpl  ".to_string(),
         }),
-        s if s.starts_with("ruby") => Some(TextResult {
-            description: format!("Ruby script, {charset_name} text executable{line_suffix}"),
-            mime_type: "text/x-ruby".to_string(),
-            mime_encoding: mime_encoding.to_string(),
-            extensions: "???".to_string(),
-            apple: "TEXTrb  ".to_string(),
-        }),
+        s if s.starts_with("ruby")
+            && (full_path == "/usr/bin/ruby" || full_path.ends_with("/env")) =>
+        {
+            Some(TextResult {
+                description: format!("Ruby script, {charset_name} text executable{line_suffix}"),
+                mime_type: "text/x-ruby".to_string(),
+                mime_encoding: mime_encoding.to_string(),
+                extensions: "???".to_string(),
+                apple: "TEXTrb  ".to_string(),
+            })
+        }
         "node" | "nodejs" => Some(TextResult {
             description: format!("Node.js script, {charset_name} text executable{line_suffix}"),
             mime_type: "application/javascript".to_string(),
@@ -286,7 +365,22 @@ fn check_shebang(
             apple: "TEXTjs  ".to_string(),
         }),
         _ => Some(TextResult {
-            description: format!("a {full_path} script, {charset_name} text executable{line_suffix}"),
+            description: {
+                let leading_space = if buffer.starts_with(b"#! ") || buffer.starts_with(b"#!\t") {
+                    " "
+                } else {
+                    ""
+                };
+                let args = parts.iter().skip(1).copied().collect::<Vec<_>>().join(" ");
+                let args = if args.is_empty() {
+                    String::new()
+                } else {
+                    format!(" {args}")
+                };
+                format!(
+                    "a {leading_space}{full_path}{args} script text executable, {charset_name} text"
+                )
+            },
             mime_type: "text/plain".to_string(),
             mime_encoding: mime_encoding.to_string(),
             extensions: "???".to_string(),
