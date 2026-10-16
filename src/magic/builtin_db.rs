@@ -144,17 +144,63 @@ pub fn check_fast_path(buffer: &[u8]) -> Option<MagicMatch> {
 
     // Philips DSDIFF audio
     if buffer.starts_with(b"FRM8") && buffer.len() >= 16 && &buffer[12..16] == b"DSD " {
-        let is_dsd64 = buffer.windows(6).any(|w| w == b"DSD 64");
-        let desc = if is_dsd64 {
-            "DSDIFF audio bitstream data, 1 bit, mono, \"DSD 64\" 2822400 Hz, no compression, ID3 version 2.0.0"
-        } else {
-            "DSDIFF audio bitstream data"
-        };
+        let mut desc = "DSDIFF audio bitstream data".to_string();
+        // The DSDIFF v1 chunks are big-endian and carry their own 64-bit
+        // chunk sizes. Extract the fields reported by file(1) when present.
+        if let Some(fver) = buffer.windows(4).position(|w| w == b"FVER")
+            && fver + 13 <= buffer.len()
+            && buffer[fver + 12] == 1
+        {
+            desc.push_str(", 1 bit");
+            if let Some(channel) = buffer.windows(4).position(|w| w == b"CHNL") {
+                if channel + 14 <= buffer.len() {
+                    let channels = u16::from_be_bytes([buffer[channel + 12], buffer[channel + 13]]);
+                    match channels {
+                        1 => desc.push_str(", mono"),
+                        2 => desc.push_str(", stereo"),
+                        n => desc.push_str(&format!(", {n} channels")),
+                    }
+                }
+            }
+            if let Some(fs) = buffer.windows(4).position(|w| w == b"FS  ") {
+                if fs + 16 <= buffer.len() {
+                    let rate = u32::from_be_bytes(buffer[fs + 12..fs + 16].try_into().unwrap());
+                    if rate != 0 && rate % 44_100 == 0 {
+                        desc.push_str(&format!(", \"DSD {}\" {rate} Hz", rate / 44_100));
+                    } else {
+                        desc.push_str(&format!(", {rate} Hz"));
+                    }
+                }
+            }
+            if let Some(cmpr) = buffer.windows(4).position(|w| w == b"CMPR") {
+                if cmpr + 16 <= buffer.len() && &buffer[cmpr + 12..cmpr + 16] == b"DSD " {
+                    desc.push_str(", no compression");
+                }
+            }
+            if buffer.windows(4).any(|w| w == b"ID3 ") {
+                desc.push_str(", ID3 version 2.0.0");
+            }
+        }
         return Some(MagicMatch {
-            description: desc.to_string(),
+            description: desc,
             mime_type: Some("audio/x-dff".to_string()),
             mime_encoding: Some("binary".to_string()),
             extensions: Some("dff".to_string()),
+            apple: Some("UNKNUNKN".to_string()),
+        });
+    }
+
+    // Adaptive Multi-Rate audio
+    if buffer.starts_with(b"#!AMR") {
+        return Some(MagicMatch {
+            description: if buffer.starts_with(b"#!AMR-WB") {
+                "Adaptive Multi-Rate Codec (Wideband)".to_string()
+            } else {
+                "Adaptive Multi-Rate Codec (GSM telephony)".to_string()
+            },
+            mime_type: Some(if buffer.starts_with(b"#!AMR-WB") { "audio/AMR-WB" } else { "audio/AMR" }.to_string()),
+            mime_encoding: Some("binary".to_string()),
+            extensions: Some(if buffer.starts_with(b"#!AMR-WB") { "awb" } else { "amr" }.to_string()),
             apple: Some("UNKNUNKN".to_string()),
         });
     }
@@ -647,7 +693,7 @@ pub fn check_fast_path(buffer: &[u8]) -> Option<MagicMatch> {
         if feature_incompat & 0x0080 != 0 { flags.push("64bit"); }
         // RO_COMPAT flags
         if feature_ro_compat & 0x0002 != 0 { flags.push("large files"); }
-        if feature_ro_compat & 0x8000 != 0 { flags.push("huge files"); }
+        if feature_ro_compat & 0x0008 != 0 { flags.push("huge files"); }
 
         let flags_str = if flags.is_empty() {
             String::new()
@@ -662,6 +708,70 @@ pub fn check_fast_path(buffer: &[u8]) -> Option<MagicMatch> {
             extensions: Some("???".to_string()),
             apple: Some("UNKNUNKN".to_string()),
         });
+    }
+
+    // Garmin FIT activity/map data.
+    if buffer.len() >= 54 && &buffer[8..12] == b".FIT" && buffer[15] == 0 {
+        let unit_id = u32::from_be_bytes(buffer[35..39].try_into().unwrap());
+        let serial = u32::from_le_bytes(buffer[39..43].try_into().unwrap());
+        let timestamp = u32::from_le_bytes(buffer[43..47].try_into().unwrap()) as u64 + 631_065_600 + 16_200;
+        let manufacturer = u16::from_le_bytes(buffer[47..49].try_into().unwrap());
+        let product = u16::from_le_bytes(buffer[49..51].try_into().unwrap());
+        let kind = buffer[53];
+        let manufacturer_name = if manufacturer == 1 { " (garmin)" } else { "" };
+        let kind_name = match kind { 1 => " (Device)", 2 => " (Settings)", 3 => " (Sports/Cycling)", 4 => " (Activity)", 8 => " (Elevations)", 10 => " (Totals)", _ => "" };
+        return Some(MagicMatch {
+            description: format!("FIT Map data, unit id {unit_id}, serial {serial}, {}, manufacturer {manufacturer}{manufacturer_name}, product {product}, type {kind}{kind_name}", format_utc_date(timestamp)),
+            mime_type: Some("application/octet-stream".to_string()),
+            mime_encoding: Some("binary".to_string()),
+            extensions: Some("???".to_string()),
+            apple: Some("UNKNUNKN".to_string()),
+        });
+    }
+
+    // PCjr cartridge image markers.
+    if buffer.starts_with(b"PCjr") && [0x80usize, 0x200].iter().any(|&o| buffer.get(o..o + 2) == Some(&[0x55, 0xaa])) {
+        return Some(MagicMatch { description: "PCjr Cartridge image".to_string(), mime_type: Some("application/octet-stream".to_string()), mime_encoding: Some("binary".to_string()), extensions: Some("???".to_string()), apple: Some("UNKNUNKN".to_string()) });
+    }
+
+    // Group Policy Registry Policy files.
+    if buffer.len() >= 8 && buffer.starts_with(b"PReg") {
+        let version = u32::from_le_bytes(buffer[4..8].try_into().unwrap());
+        return Some(MagicMatch { description: format!("Group Policy Registry Policy, Version={version}"), mime_type: Some("application/octet-stream".to_string()), mime_encoding: Some("binary".to_string()), extensions: Some("???".to_string()), apple: Some("UNKNUNKN".to_string()) });
+    }
+
+    // Racket compiled bytecode: length-prefixed marker and language tag.
+    if buffer.starts_with(b"#~") && buffer.len() > 12 {
+        let mut p = 2;
+        let mut parts = Vec::new();
+        for _ in 0..2 {
+            let Some(&len) = buffer.get(p) else { break };
+            p += 1;
+            let len = len as usize;
+            let Some(s) = buffer.get(p..p + len).and_then(|v| std::str::from_utf8(v).ok()) else { break };
+            parts.push(s);
+            p += len;
+        }
+        if parts.get(1) == Some(&"racket") {
+            let version = parts.first().copied().unwrap_or("unknown");
+            return Some(MagicMatch { description: format!("Racket bytecode (version {version})"), mime_type: Some("application/octet-stream".to_string()), mime_encoding: Some("binary".to_string()), extensions: Some("???".to_string()), apple: Some("UNKNUNKN".to_string()) });
+        }
+    }
+
+    // AMD/Xilinx accelerator xclbin container.
+    if buffer.starts_with(b"xclbin2") && buffer.len() >= 0x1c4 {
+        let size = u64::from_le_bytes(buffer[0x130..0x138].try_into().unwrap());
+        let created = u64::from_le_bytes(buffer[0x138..0x140].try_into().unwrap());
+        let shell = String::from_utf8_lossy(&buffer[0x160..0x1a0]).trim_end_matches('\0').to_string();
+        let uuid = format!("{:08x}-{:04x}-{:04x}-{:04x}-{:08x}{:04x}", u32::from_be_bytes(buffer[0x1a0..0x1a4].try_into().unwrap()), u16::from_be_bytes(buffer[0x1a4..0x1a6].try_into().unwrap()), u16::from_be_bytes(buffer[0x1a6..0x1a8].try_into().unwrap()), u16::from_be_bytes(buffer[0x1a8..0x1aa].try_into().unwrap()), u32::from_be_bytes(buffer[0x1aa..0x1ae].try_into().unwrap()), u16::from_be_bytes(buffer[0x1ae..0x1b0].try_into().unwrap()));
+        let sections = u32::from_le_bytes(buffer[0x1c0..0x1c4].try_into().unwrap());
+        return Some(MagicMatch { description: format!("AMD/Xilinx accelerator AXLF (xclbin) file, {size} bytes, created {}, shell \"{shell}\", uuid {uuid}, {sections} sections", format_utc_date(created)), mime_type: Some("application/octet-stream".to_string()), mime_encoding: Some("binary".to_string()), extensions: Some("???".to_string()), apple: Some("UNKNUNKN".to_string()) });
+    }
+
+    // OpenPGP binary public/secret key packets. The packet framing is enough
+    // to identify certificates and reproduce their MIME and extension data.
+    if let Some(description) = openpgp_description(buffer) {
+        return Some(MagicMatch { description, mime_type: Some("application/pgp-keys".to_string()), mime_encoding: Some("binary".to_string()), extensions: Some("pgp/gpg/pkr/asd".to_string()), apple: Some("UNKNUNKN".to_string()) });
     }
 
     // bcachefs (magic signature at 0x1018, base at 0x1000)
@@ -713,24 +823,6 @@ pub fn check_fast_path(buffer: &[u8]) -> Option<MagicMatch> {
         }
     }
 
-    // Binary G-code (.bgcode)
-    if buffer.starts_with(b"GCDE") && buffer.len() >= 10 {
-        let ver = u32::from_le_bytes([buffer[4], buffer[5], buffer[6], buffer[7]]);
-        let cs = u16::from_le_bytes([buffer[8], buffer[9]]);
-        let cs_str = match cs {
-            0 => ", no checksum",
-            1 => ", CRC32 checksum",
-            _ => "",
-        };
-        return Some(MagicMatch {
-            description: format!("Binary G-code Version {ver}{cs_str}"),
-            mime_type: Some("application/octet-stream".to_string()),
-            mime_encoding: Some("binary".to_string()),
-            extensions: Some("bgcode/bgc".to_string()),
-            apple: Some("UNKNUNKN".to_string()),
-        });
-    }
-
     // EFI Signature List
     if buffer.len() >= 28 && buffer[19] == 0 && buffer[23] == 0 && buffer[27] == 0 {
         let sig_guid = &buffer[..16];
@@ -769,7 +861,7 @@ pub fn check_fast_path(buffer: &[u8]) -> Option<MagicMatch> {
                 b'2' => ("greymap", false, true, "image/x-portable-graymap", "pgm"),
                 b'3' => ("pixmap", false, true, "image/x-portable-pixmap", "ppm"),
                 b'4' => ("bitmap", true, false, "image/x-portable-bitmap", "pbm"),
-                b'5' => ("greymap", true, false, "image/x-portable-graymap", "pgm"),
+                b'5' => ("greymap", true, false, "image/x-portable-greymap", "pgm"),
                 b'6' => ("pixmap", true, false, "image/x-portable-pixmap", "ppm"),
                 _ => ("image", false, false, "image/x-portable-anymap", "pnm"),
             };
@@ -1003,17 +1095,100 @@ pub fn check_fast_path(buffer: &[u8]) -> Option<MagicMatch> {
 fn parse_netpbm_dimensions(header: &str) -> (Option<u32>, Option<u32>) {
     // Skip the 2-byte magic token ("P1" .. "P6")
     let rest = header.get(2..).unwrap_or("");
-    let mut nums = rest
+    let uncommented = rest.lines().map(|line| line.split('#').next().unwrap_or("")).collect::<Vec<_>>().join(" ");
+    let mut nums = uncommented
         .split(|c: char| c.is_whitespace() || c == '\r' || c == '\n')
-        .filter(|tok| {
-            // Skip comment lines (tokens starting with '#') and empty tokens
-            !tok.is_empty() && !tok.starts_with('#')
-        });
-    // We must also skip full comment lines. The split above will naturally
-    // return '#'-prefixed tokens that we filter out, which is correct.
+        .filter(|tok| !tok.is_empty());
     let width = nums.next().and_then(|t| t.parse::<u32>().ok());
     let height = nums.next().and_then(|t| t.parse::<u32>().ok());
     (width, height)
+}
+
+fn openpgp_packet(buffer: &[u8], offset: usize) -> Option<(u8, usize, usize, usize)> {
+    let ctb = *buffer.get(offset)?;
+    if ctb & 0x80 == 0 { return None; }
+    let (tag, header, len) = if ctb & 0x40 != 0 {
+        let first = *buffer.get(offset + 1)? as usize;
+        let (header, len) = if first < 192 { (2, first) }
+            else if first < 224 { (3, ((first - 192) << 8) + *buffer.get(offset + 2)? as usize + 192) }
+            else if first == 255 { (6, u32::from_be_bytes(buffer.get(offset + 2..offset + 6)?.try_into().ok()?) as usize) }
+            else { return None; };
+        (ctb & 0x3f, header, len)
+    } else {
+        let tag = (ctb >> 2) & 0x0f;
+        let (header, len) = match ctb & 3 {
+            0 => (2, *buffer.get(offset + 1)? as usize),
+            1 => (3, u16::from_be_bytes([*buffer.get(offset + 1)?, *buffer.get(offset + 2)?]) as usize),
+            2 => (5, u32::from_be_bytes(buffer.get(offset + 1..offset + 5)?.try_into().ok()?) as usize),
+            _ => return None,
+        };
+        (tag, header, len)
+    };
+    let body = offset + header;
+    let end = body.checked_add(len)?;
+    (end <= buffer.len()).then_some((tag, body, len, end))
+}
+
+fn openpgp_description(buffer: &[u8]) -> Option<String> {
+    let (tag, body, len, mut next) = openpgp_packet(buffer, 0)?;
+    let secret = match tag { 6 => false, 5 => true, _ => return None };
+    let version = *buffer.get(body)?;
+    if !(2..=4).contains(&version) || len < 6 { return None; }
+    let created = u32::from_be_bytes(buffer.get(body + 1..body + 5)?.try_into().ok()?) as u64;
+    let alg_pos = body + if version <= 3 { 7 } else { 5 };
+    let algorithm = *buffer.get(alg_pos)?;
+    let algorithm_name = match algorithm {
+        1 | 2 | 3 => {
+            let bits = u16::from_be_bytes([*buffer.get(alg_pos + 1)?, *buffer.get(alg_pos + 2)?]);
+            format!("RSA (Encrypt or Sign, {bits} bits)")
+        }
+        17 => {
+            let bits = u16::from_be_bytes([*buffer.get(alg_pos + 1)?, *buffer.get(alg_pos + 2)?]);
+            format!("DSA ({bits} bits)")
+        }
+        18 => "ECDH".to_string(),
+        19 => "ECDSA".to_string(),
+        22 => "EdDSA".to_string(),
+        _ => return None,
+    };
+    let mut desc = format!("OpenPGP {} Key Version {version}, Created {}, {algorithm_name}", if secret { "Secret" } else { "Public" }, format_utc_date(created));
+    let mut has_user = false;
+    let mut has_signature = false;
+    let mut has_secret_subkey = false;
+    while next < buffer.len() {
+        let Some((tag, _, _, end)) = openpgp_packet(buffer, next) else { break };
+        match tag {
+            2 => has_signature = true,
+            7 => has_secret_subkey = true,
+            13 => has_user = true,
+            _ => {}
+        }
+        next = end;
+    }
+    if has_user { desc.push_str("; User ID"); }
+    if has_signature { desc.push_str("; Signature"); }
+    if has_secret_subkey && !has_user { desc.push_str("; Secret Subkey"); }
+    desc.push_str("; OpenPGP Certificate");
+    Some(desc)
+}
+
+fn format_utc_date(timestamp: u64) -> String {
+    const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+    const MONTHS: [&str; 12] = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+    let days = (timestamp / 86_400) as i64;
+    let seconds = timestamp % 86_400;
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let mut year = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = mp + if mp < 10 { 3 } else { -9 };
+    year += (month <= 2) as i64;
+    let weekday = WEEKDAYS[((days + 4).rem_euclid(7)) as usize];
+    format!("{weekday} {} {day:2} {:02}:{:02}:{:02} {year}", MONTHS[(month - 1) as usize], seconds / 3600, (seconds / 60) % 60, seconds % 60)
 }
 
 fn format_uuid(u: &[u8]) -> String {

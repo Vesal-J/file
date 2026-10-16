@@ -53,8 +53,31 @@ pub fn test_text(buffer: &[u8], config: &Config) -> Option<TextResult> {
     }
 
     // 2. Check languages, markup, scripts
-    if let Ok(text) = std::str::from_utf8(buffer.get(..buffer.len().min(8192)).unwrap_or(buffer)) {
+    let scan = buffer.get(..buffer.len().min(8192)).unwrap_or(buffer);
+    let decoded = match charset {
+        crate::text::encoding::Charset::Utf16Le | crate::text::encoding::Charset::Utf16Be => {
+            let data = if scan.starts_with(b"\xff\xfe") || scan.starts_with(b"\xfe\xff") { &scan[2..] } else { scan };
+            let units = data.chunks_exact(2).map(|b| if charset == crate::text::encoding::Charset::Utf16Le { u16::from_le_bytes([b[0], b[1]]) } else { u16::from_be_bytes([b[0], b[1]]) });
+            Some(String::from_utf16_lossy(&units.collect::<Vec<_>>()))
+        }
+        _ => std::str::from_utf8(scan).ok().map(str::to_owned),
+    };
+    if let Some(text) = decoded.as_deref() {
         let trimmed = text.trim_start();
+
+        if let Some(header) = trimmed.strip_prefix("$ANSIBLE_VAULT;") {
+            let header = header.lines().next().unwrap_or("");
+            let fields: Vec<&str> = header.split(';').collect();
+            if fields.len() >= 2 {
+                return Some(TextResult {
+                    description: format!("Ansible Vault, version {}, encryption {}", fields[0], fields[1]),
+                    mime_type: "text/plain".to_string(),
+                    mime_encoding: mime_encoding.to_string(),
+                    extensions: "???".to_string(),
+                    apple: "TEXT????".to_string(),
+                });
+            }
+        }
 
         // HTML
         if trimmed.starts_with("<!DOCTYPE html")
@@ -73,9 +96,20 @@ pub fn test_text(buffer: &[u8], config: &Config) -> Option<TextResult> {
 
         // XML / SVG
         if trimmed.starts_with("<?xml") || trimmed.starts_with("<?XML") {
+            if text.contains("<osm") {
+                return Some(TextResult {
+                    description: format!("OpenStreetMap XML data, {charset_name} text{line_suffix}"),
+                    mime_type: "text/plain".to_string(),
+                    mime_encoding: mime_encoding.to_string(),
+                    extensions: "???".to_string(),
+                    apple: "TEXT????".to_string(),
+                });
+            }
             if text.contains("<svg") || text.contains("<SVG") {
                 return Some(TextResult {
-                    description: format!("SVG Scalable Vector Graphics image, {charset_name} text{line_suffix}"),
+                    description: if matches!(charset, crate::text::encoding::Charset::Utf16Le | crate::text::encoding::Charset::Utf16Be) {
+                        format!("SVG Scalable Vector Graphics image, Unicode text, UTF-16, {}-endian text", if charset == crate::text::encoding::Charset::Utf16Le { "little" } else { "big" })
+                    } else { format!("SVG Scalable Vector Graphics image, {charset_name} text{line_suffix}") },
                     mime_type: "image/svg+xml".to_string(),
                     mime_encoding: mime_encoding.to_string(),
                     extensions: "svg".to_string(),
@@ -93,7 +127,9 @@ pub fn test_text(buffer: &[u8], config: &Config) -> Option<TextResult> {
 
         if trimmed.starts_with("<svg") || trimmed.starts_with("<!DOCTYPE svg") || trimmed.starts_with("<!doctype svg") {
             return Some(TextResult {
-                description: format!("SVG Scalable Vector Graphics image, {charset_name} text{line_suffix}"),
+                description: if matches!(charset, crate::text::encoding::Charset::Utf16Le | crate::text::encoding::Charset::Utf16Be) {
+                    format!("SVG Scalable Vector Graphics image, Unicode text, UTF-16, {}-endian text", if charset == crate::text::encoding::Charset::Utf16Le { "little" } else { "big" })
+                } else { format!("SVG Scalable Vector Graphics image, {charset_name} text{line_suffix}") },
                 mime_type: "image/svg+xml".to_string(),
                 mime_encoding: mime_encoding.to_string(),
                 extensions: "svg".to_string(),
