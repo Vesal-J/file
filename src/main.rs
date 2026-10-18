@@ -3,4 +3,9 @@
 // For the full copyright and license information, please view the LICENSE
 // file that was distributed with this source code.
 
-uucore::bin!(uu_file);
+fn main() {
+    if let Err(error) = uu_file::run(std::env::args_os()) {
+        eprintln!("file: {error}");
+        std::process::exit(1);
+    }
+}

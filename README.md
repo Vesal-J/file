@@ -17,6 +17,10 @@ A clean-room, production-grade, memory-safe, drop-in replacement for the Linux `
   7. Deterministic fallback to binary `data`
 - **Output Flexibility**: Supports Brief (`-b`), MIME (`-i`, `--mime-type`, `--mime-encoding`), Apple codes (`--apple`), Extensions (`--extension`), custom separators (`-F`), print0 (`-0`), and column alignment padding (`-N` to disable).
 
+## Magic database
+
+The text rules from the upstream [`file` project](https://github.com/file/file) are included under `magic/` with their license, but are not embedded in the binary. Pass `-m magic/Magdir` to load them. `-m` also accepts a text magic file or compiled `.mgc` database. The Rust `.mgc` reader supports database versions 16–18 and 20–21 and translates supported rule records into the Rust rule model. The implementation does not link to the C `libmagic` library, and its parser/evaluator do not yet cover every libmagic rule feature; results may differ for unsupported rules.
+
 ## Installation
 
 ```bash

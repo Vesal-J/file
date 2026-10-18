@@ -135,14 +135,20 @@ fn parse_type(s: &str) -> Option<(MagicType, Option<u64>)> {
         "date" => MagicType::Numeric(NumericType::Date(Endianness::Native)),
         "ledate" => MagicType::Numeric(NumericType::Date(Endianness::Little)),
         "bedate" => MagicType::Numeric(NumericType::Date(Endianness::Big)),
-        "string" => MagicType::String { case_insensitive: false },
-        "string/c" => MagicType::String { case_insensitive: true },
+        "string" => MagicType::String {
+            case_insensitive: false,
+        },
+        "string/c" => MagicType::String {
+            case_insensitive: true,
+        },
         "pstring" => MagicType::PString,
         "search" => MagicType::Search { max_length: 8192 },
         "regex" => MagicType::Regex { max_length: 8192 },
         "clear" => MagicType::Clear,
         "default" => MagicType::Default,
-        _ => MagicType::String { case_insensitive: false },
+        // Unknown libmagic types must be ignored. Treating them as strings can
+        // turn numeric or platform-specific rules into false positive matches.
+        _ => return None,
     };
 
     Some((magic_type, mask))
@@ -267,7 +273,7 @@ fn parse_num_u64(s: &str) -> Option<u64> {
     }
 }
 
-fn build_hierarchy(rules: Vec<MagicRule>) -> Vec<MagicRule> {
+pub(crate) fn build_hierarchy(rules: Vec<MagicRule>) -> Vec<MagicRule> {
     let mut root_rules: Vec<MagicRule> = Vec::new();
     let mut stack: Vec<MagicRule> = Vec::new();
 

@@ -6,6 +6,7 @@
 pub mod ast;
 pub mod builtin_db;
 pub mod evaluator;
+mod mgc;
 pub mod parser;
 
 use crate::config::Config;
@@ -24,10 +25,50 @@ impl MagicDatabase {
     }
 
     pub fn load_file(&mut self, path: &std::path::Path) -> std::io::Result<()> {
-        let content = std::fs::read_to_string(path)?;
+        let original_len = self.custom_rules.len();
+        let result = (|| {
+            let metadata = std::fs::metadata(path)?;
+            if metadata.is_dir() {
+                // libmagic's apprentice loader reads regular files in a magic
+                // directory in lexical order and ignores dotfiles.
+                let mut files = std::fs::read_dir(path)?
+                    .filter_map(Result::ok)
+                    .map(|entry| entry.path())
+                    .filter(|entry| {
+                        entry
+                            .file_name()
+                            .is_some_and(|name| !name.to_string_lossy().starts_with('.'))
+                            && entry.metadata().is_ok_and(|metadata| metadata.is_file())
+                    })
+                    .collect::<Vec<_>>();
+                files.sort();
+                for file in files {
+                    self.load_database_file(&file)?;
+                }
+            } else {
+                self.load_database_file(path)?;
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            self.custom_rules.truncate(original_len);
+            return Err(error);
+        }
+        self.sort_rules();
+        Ok(())
+    }
+
+    fn load_database_file(&mut self, path: &std::path::Path) -> std::io::Result<()> {
+        let bytes = std::fs::read(path)?;
+        if bytes.starts_with(b"\x1c\x04\x1e\xf1") || bytes.starts_with(b"\xf1\x1e\x04\x1c") {
+            let rules = mgc::parse(&bytes)?;
+            self.custom_rules.extend(rules);
+            return Ok(());
+        }
+        let content = String::from_utf8(bytes)
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
         let rules = parser::parse_magic_file(&content);
         self.custom_rules.extend(rules);
-        self.sort_rules();
         Ok(())
     }
 
@@ -73,13 +114,24 @@ impl MagicDatabase {
                     .join("\\012- ");
 
                 // Use metadata from first match, upgraded by later matches
-                let mut merged = matches.into_iter().reduce(|mut acc, m| {
-                    if m.mime_type.is_some() { acc.mime_type = m.mime_type; }
-                    if m.mime_encoding.is_some() { acc.mime_encoding = m.mime_encoding; }
-                    if m.extensions.is_some() { acc.extensions = m.extensions; }
-                    if m.apple.is_some() { acc.apple = m.apple; }
-                    acc
-                }).unwrap();
+                let mut merged = matches
+                    .into_iter()
+                    .reduce(|mut acc, m| {
+                        if m.mime_type.is_some() {
+                            acc.mime_type = m.mime_type;
+                        }
+                        if m.mime_encoding.is_some() {
+                            acc.mime_encoding = m.mime_encoding;
+                        }
+                        if m.extensions.is_some() {
+                            acc.extensions = m.extensions;
+                        }
+                        if m.apple.is_some() {
+                            acc.apple = m.apple;
+                        }
+                        acc
+                    })
+                    .unwrap();
                 merged.description = desc;
                 return Some(merged);
             }
@@ -91,11 +143,9 @@ impl MagicDatabase {
             }
         }
 
-        // Fast-path embedded table (only used when no custom rules loaded)
-        if self.custom_rules.is_empty() {
-            return builtin_db::check_fast_path(buffer);
-        }
-        None
+        // Keep the hand-written Rust fast paths as a fallback for formats the
+        // bundled source rules or the current parser do not recognize.
+        builtin_db::check_fast_path(buffer)
     }
 }
 

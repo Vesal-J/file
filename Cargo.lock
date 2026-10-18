@@ -1252,7 +1252,6 @@ dependencies = [
  "glob",
  "memchr",
  "regex",
- "uucore",
  "uutests",
  "walkdir",
 ]

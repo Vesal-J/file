@@ -16,10 +16,10 @@ pub mod text;
 use clap::{Arg, ArgAction, Command};
 use config::{Config, MimeMode, TestKind};
 use magic::MagicDatabase;
+use std::error::Error;
 use std::ffi::OsString;
 use std::io::BufRead;
 use std::path::{Path, PathBuf};
-use uucore::error::{UResult, USimpleError};
 
 pub fn uu_app() -> Command {
     Command::new("file")
@@ -246,8 +246,11 @@ pub fn uu_app() -> Command {
         )
 }
 
-#[uucore::main(no_signals)]
-pub fn uumain(args: impl uucore::Args) -> UResult<()> {
+pub fn uumain(args: impl IntoIterator<Item = OsString>) -> Result<(), Box<dyn Error>> {
+    run(args)
+}
+
+pub fn run(args: impl IntoIterator<Item = OsString>) -> Result<(), Box<dyn Error>> {
     let matches = uu_app().try_get_matches_from(args)?;
 
     let mut config = Config::default();
@@ -294,7 +297,11 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
             if let Some(kind) = TestKind::parse(ex) {
                 config.exclude_tests.insert(kind);
             } else {
-                return Err(USimpleError::new(1, format!("unknown test `{ex}`")));
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    format!("unknown test `{ex}`"),
+                )
+                .into());
             }
         }
     }
@@ -396,10 +403,11 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
     }
 
     if file_paths.is_empty() {
-        return Err(USimpleError::new(
-            1,
-            "no files specified. Try 'file --help' for more information.".to_string(),
-        ));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "no files specified. Try 'file --help' for more information.",
+        )
+        .into());
     }
 
     // Calculate alignment padding
@@ -444,7 +452,7 @@ pub fn uumain(args: impl uucore::Args) -> UResult<()> {
     }
 
     if had_error {
-        Err(USimpleError::new(1, "".to_string()))
+        Err(std::io::Error::other("").into())
     } else {
         Ok(())
     }
